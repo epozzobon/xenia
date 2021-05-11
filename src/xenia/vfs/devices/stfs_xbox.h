@@ -493,6 +493,17 @@ struct StfsHeader {
   XContentMetadata metadata;
   // TODO: title/system updates contain more data after XContentMetadata, seems
   // to affect header.header_size
+
+  void set_defaults() {
+    header.magic = XContentPackageType::kCon;
+    header.header_size = sizeof(StfsHeader);
+
+    metadata.metadata_version = 2;
+    metadata.volume_type = XContentVolumeType::kStfs;
+    metadata.volume_descriptor.stfs.descriptor_length =
+        sizeof(StfsVolumeDescriptor);
+    metadata.volume_descriptor.stfs.file_table_block_count = 0;
+  }
 };
 static_assert_size(StfsHeader, 0x971A);
 
