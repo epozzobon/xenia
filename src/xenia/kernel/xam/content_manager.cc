@@ -16,7 +16,7 @@
 #include "xenia/base/string.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xobject.h"
-#include "xenia/vfs/devices/host_path_device.h"
+#include "xenia/vfs/devices/stfs_container_device.h"
 
 namespace xe {
 namespace kernel {
@@ -31,14 +31,15 @@ static int content_device_id_ = 0;
 ContentPackage::ContentPackage(KernelState* kernel_state,
                                const std::string_view root_name,
                                const ContentData& data,
-                               const std::filesystem::path& package_path)
+                               const std::filesystem::path& package_path,
+                               bool create)
     : kernel_state_(kernel_state), root_name_(root_name) {
   device_path_ = fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_);
   content_data_ = data;
 
   auto fs = kernel_state_->file_system();
-  auto device =
-      std::make_unique<vfs::HostPathDevice>(device_path_, package_path, false);
+  auto device = std::make_unique<vfs::StfsContainerDevice>(
+      device_path_, package_path, create);
   device->Initialize();
   fs->RegisterDevice(std::move(device));
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
@@ -105,8 +106,8 @@ std::vector<ContentData> ContentManager::ListContent(uint32_t device_id,
   auto package_root = ResolvePackageRoot(content_type);
   auto file_infos = xe::filesystem::ListFiles(package_root);
   for (const auto& file_info : file_infos) {
-    if (file_info.type != xe::filesystem::FileInfo::Type::kDirectory) {
-      // Directories only.
+    if (file_info.type == xe::filesystem::FileInfo::Type::kDirectory) {
+      // Files only.
       continue;
     }
     ContentData content_data;
@@ -121,16 +122,16 @@ std::vector<ContentData> ContentManager::ListContent(uint32_t device_id,
 }
 
 std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
-    const std::string_view root_name, const ContentData& data) {
+    const std::string_view root_name, const ContentData& data, bool create) {
   auto package_path = ResolvePackagePath(data);
-  if (!std::filesystem::exists(package_path)) {
+  if (!create && !std::filesystem::exists(package_path)) {
     return nullptr;
   }
 
   auto global_lock = global_critical_region_.Acquire();
 
   auto package = std::make_unique<ContentPackage>(kernel_state_, root_name,
-                                                  data, package_path);
+                                                  data, package_path, create);
   return package;
 }
 
@@ -154,11 +155,14 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name,
     return X_ERROR_ALREADY_EXISTS;
   }
 
-  if (!std::filesystem::create_directories(package_path)) {
+  auto parent = package_path.parent_path();
+  std::filesystem::create_directories(parent);
+  if (!std::filesystem::exists(parent)) {
+    // Failed to create parent path?
     return X_ERROR_ACCESS_DENIED;
   }
 
-  auto package = ResolvePackage(root_name, data);
+  auto package = ResolvePackage(root_name, data, true);
   assert_not_null(package);
 
   open_packages_.insert({string_key::create(root_name), package.release()});
@@ -228,8 +232,8 @@ X_RESULT ContentManager::SetContentThumbnail(const ContentData& data,
                                              std::vector<uint8_t> buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(data);
-  std::filesystem::create_directories(package_path);
-  if (std::filesystem::exists(package_path)) {
+  // std::filesystem::create_directories(package_path);
+  /*if (std::filesystem::exists(package_path)) {
     auto thumb_path = package_path / kThumbnailFileName;
     auto file = xe::filesystem::OpenFile(thumb_path, "wb");
     fwrite(buffer.data(), 1, buffer.size(), file);
@@ -237,7 +241,8 @@ X_RESULT ContentManager::SetContentThumbnail(const ContentData& data,
     return X_ERROR_SUCCESS;
   } else {
     return X_ERROR_FILE_NOT_FOUND;
-  }
+  }*/
+  return X_ERROR_SUCCESS;
 }
 
 X_RESULT ContentManager::DeleteContent(const ContentData& data) {
