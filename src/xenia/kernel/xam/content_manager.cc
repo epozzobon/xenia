@@ -216,35 +216,69 @@ X_RESULT ContentManager::GetContentThumbnail(const XCONTENT_DATA& data,
                                              std::vector<uint8_t>* buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(data);
-  auto thumb_path = package_path / kThumbnailFileName;
-  if (std::filesystem::exists(thumb_path)) {
-    auto file = xe::filesystem::OpenFile(thumb_path, "rb");
-    fseek(file, 0, SEEK_END);
-    size_t file_len = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    buffer->resize(file_len);
-    fread(const_cast<uint8_t*>(buffer->data()), 1, buffer->size(), file);
-    fclose(file);
-    return X_ERROR_SUCCESS;
-  } else {
+  if (!std::filesystem::exists(package_path)) {
     return X_ERROR_FILE_NOT_FOUND;
   }
+
+  auto file = xe::filesystem::OpenFile(package_path, "rb");
+  vfs::StfsHeader header;
+  if (fread(&header, sizeof(header), 1, file) != 1) {
+    fclose(file);
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+  auto thumb_size = std::min(uint32_t(header.metadata.thumbnail_size),
+                             vfs::XContentMetadata::kThumbLengthV2);
+  buffer->resize(thumb_size);
+  memcpy(const_cast<uint8_t*>(buffer->data()), header.metadata.thumbnail,
+         thumb_size);
+
+  fclose(file);
+  return X_ERROR_SUCCESS;
 }
 
 X_RESULT ContentManager::SetContentThumbnail(const XCONTENT_DATA& data,
                                              std::vector<uint8_t> buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(data);
-  // std::filesystem::create_directories(package_path);
-  /*if (std::filesystem::exists(package_path)) {
-    auto thumb_path = package_path / kThumbnailFileName;
-    auto file = xe::filesystem::OpenFile(thumb_path, "wb");
-    fwrite(buffer.data(), 1, buffer.size(), file);
-    fclose(file);
-    return X_ERROR_SUCCESS;
-  } else {
+  if (!std::filesystem::exists(package_path)) {
     return X_ERROR_FILE_NOT_FOUND;
-  }*/
+  }
+
+  auto thumb_size =
+      std::min(uint32_t(buffer.size()), vfs::XContentMetadata::kThumbLengthV2);
+
+  auto package =
+      std::find_if(open_packages_.cbegin(), open_packages_.cend(),
+                   [data](std::pair<string_key, ContentPackage*> content) {
+                     return data == content.second->GetPackageContentData();
+                   });
+
+  if (package != std::end(open_packages_)) {
+    // Package was found in open_packages_
+
+    // TODO: how to get the StfsContainerDevice from a ContentPackage?
+    return X_ERROR_SUCCESS;
+  }
+
+  // Package isn't loaded atm
+  //
+  // TODO: in future this will probably need to create an StfsContainerDevice
+  // and update thumb through that, so header hashes etc are updated
+  // Xenia doesn't care about those hashes though, but it's important for
+  // console support
+
+  auto file = xe::filesystem::OpenFile(package_path, "rb+");
+  vfs::StfsHeader header;
+  if (fread(&header, sizeof(header), 1, file) != 1) {
+    fclose(file);
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  header.metadata.thumbnail_size = thumb_size;
+  memcpy(header.metadata.thumbnail, buffer.data(), thumb_size);
+  fseek(file, 0, SEEK_SET);
+  fwrite(&header, sizeof(header), 1, file);
+  fclose(file);
   return X_ERROR_SUCCESS;
 }
 
