@@ -14,6 +14,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/string.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xobject.h"
@@ -52,34 +53,13 @@ ContentPackage::~ContentPackage() {
   fs->UnregisterDevice(device_path_);
 }
 
-void ContentPackage::SetThumbnail(const std::vector<uint8_t>& data) {
+vfs::StfsHeader* ContentPackage::GetPackageHeader() {
   auto device_base = kernel_state_->file_system()->ResolveDevice(device_path_);
   if (!device_base) {
-    return;
+    return nullptr;
   }
 
-  auto& header =
-      reinterpret_cast<vfs::StfsContainerDevice*>(device_base)->header();
-
-  auto thumb_length =
-      std::min(data.size(), size_t(vfs::XContentMetadata::kThumbLengthV2));
-  memcpy(header.metadata.thumbnail, data.data(), thumb_length);
-  header.metadata.thumbnail_size = uint32_t(thumb_length);
-}
-
-void ContentPackage::GetThumbnail(std::vector<uint8_t>* data) {
-  auto device_base = kernel_state_->file_system()->ResolveDevice(device_path_);
-  if (!device_base) {
-    return;
-  }
-
-  auto& header =
-      reinterpret_cast<vfs::StfsContainerDevice*>(device_base)->header();
-
-  auto thumb_length = std::min(uint32_t(header.metadata.thumbnail_size),
-                               vfs::XContentMetadata::kThumbLengthV2);
-  data->resize(thumb_length);
-  memcpy(data->data(), header.metadata.thumbnail, thumb_length);
+  return &reinterpret_cast<vfs::StfsContainerDevice*>(device_base)->header();
 }
 
 ContentManager::ContentManager(KernelState* kernel_state,
@@ -187,7 +167,8 @@ bool ContentManager::ContentExists(const XCONTENT_DATA& data) {
 }
 
 X_RESULT ContentManager::CreateContent(const std::string_view root_name,
-                                       const XCONTENT_DATA& data) {
+                                       const XCONTENT_DATA& data,
+                                       uint32_t flags) {
   auto global_lock = global_critical_region_.Acquire();
 
   if (open_packages_.count(string_key(root_name))) {
@@ -210,6 +191,44 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name,
 
   auto package = ResolvePackage(root_name, data, false, true);
   assert_not_null(package);
+
+  // Setup package header
+  auto header = package->GetPackageHeader();
+
+  header->metadata.flags.bits.profile_transfer =
+      ((flags & XCONTENTFLAG_ALLOWPROFILE_TRANSFER) &&
+       !(flags & XCONTENTFLAG_NOPROFILE_TRANSFER));
+
+  header->metadata.flags.bits.move_only_transfer =
+      (flags & XCONTENTFLAG_MOVEONLY_TRANSFER);
+
+  // Not sure if device_transfer is meant to be set like this
+  header->metadata.flags.bits.device_transfer =
+      !(flags & XCONTENTFLAG_NODEVICE_TRANSFER);
+
+  // Try copying execution info from XEX opt headers
+  auto exe_module = kernel_state_->GetExecutableModule();
+  if (exe_module) {
+    xex2_opt_execution_info* exec_info = 0;
+    exe_module->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
+    if (exec_info) {
+      memcpy(&header->metadata.execution_info, exec_info,
+             sizeof(xex2_opt_execution_info));
+    }
+  }
+
+  // Copy game title in the games default language
+  header->metadata.set_title_name(
+      xe::to_utf16(kernel_state_->emulator()->title_name()));
+
+  // Now copy data from XCONTENT_DATA into package headers
+  header->metadata.content_type = data.content_type;
+
+  // TODO: use users chosen language instead?
+  header->metadata.set_display_name(XLanguage::kEnglish, data.display_name());
+
+  // TODO: set profile ID to the offline XUID (0xE0....)
+  header->metadata.profile_id = kernel_state_->user_profile()->xuid();
 
   open_packages_.insert({string_key::create(root_name), package.release()});
 
@@ -272,7 +291,12 @@ X_RESULT ContentManager::GetContentThumbnail(const XCONTENT_DATA& data,
   if (package != std::end(open_packages_)) {
     // Package was found in open_packages_
 
-    package->second->GetThumbnail(buffer);
+    auto* header = package->second->GetPackageHeader();
+    auto thumb_length = std::min(uint32_t(header->metadata.thumbnail_size),
+                                 vfs::XContentMetadata::kThumbLengthV2);
+    buffer->resize(thumb_length);
+    memcpy(buffer->data(), header->metadata.thumbnail, thumb_length);
+
     return X_ERROR_SUCCESS;
   }
 
@@ -309,7 +333,12 @@ X_RESULT ContentManager::SetContentThumbnail(const XCONTENT_DATA& data,
   if (package != std::end(open_packages_)) {
     // Package was found in open_packages_
 
-    package->second->SetThumbnail(buffer);
+    auto* header = package->second->GetPackageHeader();
+    auto thumb_length =
+        std::min(buffer.size(), size_t(vfs::XContentMetadata::kThumbLengthV2));
+    memcpy(header->metadata.thumbnail, buffer.data(), thumb_length);
+    header->metadata.thumbnail_size = uint32_t(thumb_length);
+
     return X_ERROR_SUCCESS;
   }
 

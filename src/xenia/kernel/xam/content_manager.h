@@ -19,6 +19,7 @@
 #include "xenia/base/mutex.h"
 #include "xenia/base/string_key.h"
 #include "xenia/base/string_util.h"
+#include "xenia/vfs/devices/stfs_xbox.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -26,6 +27,16 @@ namespace kernel {
 class KernelState;
 }  // namespace kernel
 }  // namespace xe
+
+// https://github.com/ThirteenAG/Ultimate-ASI-Loader/blob/master/source/xlive/xliveless.h
+#define XCONTENTFLAG_NOPROFILE_TRANSFER 0x00000010
+#define XCONTENTFLAG_NODEVICE_TRANSFER 0x00000020
+#define XCONTENTFLAG_STRONG_SIGNED 0x00000040
+#define XCONTENTFLAG_ALLOWPROFILE_TRANSFER 0x00000080
+#define XCONTENTFLAG_MOVEONLY_TRANSFER 0x00000800
+#define XCONTENTFLAG_MANAGESTORAGE 0x00000100
+#define XCONTENTFLAG_FORCE_SHOW_UI 0x00000200
+#define XCONTENTFLAG_ENUM_EXCLUDECOMMON 0x00001000
 
 namespace xe {
 namespace kernel {
@@ -131,8 +142,7 @@ class ContentPackage {
 
   const XCONTENT_DATA& GetPackageContentData() const { return content_data_; }
 
-  void SetThumbnail(const std::vector<uint8_t>& data);
-  void GetThumbnail(std::vector<uint8_t>* data);
+  vfs::StfsHeader* GetPackageHeader();
 
  private:
   KernelState* kernel_state_;
@@ -156,7 +166,7 @@ class ContentManager {
 
   bool ContentExists(const XCONTENT_DATA& data);
   X_RESULT CreateContent(const std::string_view root_name,
-                         const XCONTENT_DATA& data);
+                         const XCONTENT_DATA& data, uint32_t flags = 0);
   X_RESULT OpenContent(const std::string_view root_name,
                        const XCONTENT_DATA& data);
   X_RESULT CloseContent(const std::string_view root_name);
