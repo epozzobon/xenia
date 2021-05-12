@@ -158,7 +158,7 @@ bool StfsContainerDevice::Initialize() {
 
   switch (header_.metadata.volume_type) {
     case XContentVolumeType::kStfs:
-      return STFSReadDirectory();
+      return STFSDirectoryRead();
       break;
     case XContentVolumeType::kSvod:
       return ReadSVOD() == Error::kSuccess;
@@ -596,12 +596,13 @@ bool StfsContainerDevice::STFSFlush() {
 
   // Seek to final allocated block, this should ensure enough space is allocated
   // for everything?
-  xe::filesystem::Seek(package_file,
-                       STFSDataBlockToOffset(descriptor.total_block_count + 1),
-                       SEEK_SET);
+  xe::filesystem::Seek(
+      package_file,
+      STFSDataBlockToOffset(descriptor.total_block_count - 1) + kBlockSize,
+      SEEK_SET);
 
   // Write out directory entries
-  STFSWriteDirectory();
+  STFSDirectoryWrite();
 
   // Sanity check
   if (descriptor.total_block_count > kBlocksPerHashLevel[2]) {
@@ -712,7 +713,7 @@ void StfsContainerDevice::FlattenChildEntries(
   }
 }
 
-void StfsContainerDevice::STFSWriteDirectory() {
+void StfsContainerDevice::STFSDirectoryWrite() {
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
 
   if (descriptor.flags.bits.read_only_format) {
@@ -751,6 +752,7 @@ void StfsContainerDevice::STFSWriteDirectory() {
   }
 
   descriptor.file_table_block_count = uint16_t(num_blocks);
+  header_.metadata.content_size = 0;
 
   auto directory_chain = STFSResizeDataBlockChain(directory_block, num_blocks);
 
@@ -777,6 +779,7 @@ void StfsContainerDevice::STFSWriteDirectory() {
           (entry->attributes_ & kFileAttributeDirectory);
 
       dir_entry.length = uint32_t(entry->size_);
+      header_.metadata.content_size += dir_entry.length;
 
       auto [create_date, create_time] =
           encode_fat_timestamp(entry->create_timestamp_);
@@ -842,7 +845,7 @@ void StfsContainerDevice::STFSWriteDirectory() {
   }
 }
 
-bool StfsContainerDevice::STFSReadDirectory() {
+bool StfsContainerDevice::STFSDirectoryRead() {
   auto root_entry = new StfsContainerEntry(this, nullptr, "", &files_);
   root_entry->attributes_ = kFileAttributeDirectory;
   root_entry_ = std::unique_ptr<Entry>(root_entry);
@@ -856,7 +859,7 @@ bool StfsContainerDevice::STFSReadDirectory() {
     // usually have dir blocks before data blocks, so guess they probably do
     // something similar to here)
     if (descriptor.total_block_count == 0 && allow_creating_) {
-      STFSWriteDirectory();
+      STFSDirectoryWrite();
       return true;
     }
     XELOGFS("XContent: file_table_block_count = 0, skipping ReadDirectory");

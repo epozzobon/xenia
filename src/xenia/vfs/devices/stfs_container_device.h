@@ -159,8 +159,8 @@ class StfsContainerDevice : public Device {
   void FlattenChildEntries(StfsContainerEntry* entry,
                            std::vector<StfsContainerEntry*>* entry_list);
 
-  bool STFSReadDirectory();
-  void STFSWriteDirectory();
+  bool STFSDirectoryRead();
+  void STFSDirectoryWrite();
 
   uint64_t STFSDataBlockToOffset(uint32_t block_num) const;
   uint32_t STFSDataBlockToHashBlockNum(uint32_t block_num,
