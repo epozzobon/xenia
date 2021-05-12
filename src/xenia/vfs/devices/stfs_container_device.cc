@@ -648,7 +648,34 @@ bool StfsContainerDevice::STFSFlush() {
       // If this is hashing a hash table we have in memory, hash the in-memory
       // table instead
       if (hash_level > 0 && hash_tables_.count(block_offset)) {
-        block_data = reinterpret_cast<uint8_t*>(&hash_tables_[block_offset]);
+        // Since we're looking at the lower hash-tables, we may as well update
+        // our free/unk counters too.
+        auto& lower_table = hash_tables_[block_offset];
+
+        // TODO: maybe should update hash_table.num_blocks around here too?
+        // Need to figure out what StfsHashState that's counting though.
+        uint32_t free_blocks = 0;
+        uint32_t free2_blocks = 0;
+        for (auto& lower_entry : lower_table.entries) {
+          if (hash_level == 1) {
+            // lower_table is an L0 table, check it for kFree/kFree2 entries
+            auto l0_state = lower_entry.level0_allocation_state();
+            if (l0_state == StfsHashState::kFree) {
+              free_blocks++;
+            } else if (l0_state == StfsHashState::kFree2) {
+              free2_blocks++;
+            }
+          } else if (hash_level == 2) {
+            // lower_table is an L1 table, add up its free/free2 counters
+            free_blocks += lower_entry.levelN_num_blocks_free();
+            free2_blocks += lower_entry.levelN_num_blocks_unk();
+          }
+        }
+
+        entry.set_levelN_num_blocks_free(free_blocks);
+        entry.set_levelN_num_blocks_unk(free2_blocks);
+
+        block_data = reinterpret_cast<uint8_t*>(&lower_table);
       } else {
         xe::filesystem::Seek(package_file, block_offset, SEEK_SET);
         fread(block_buf, 1, 0x1000, package_file);
