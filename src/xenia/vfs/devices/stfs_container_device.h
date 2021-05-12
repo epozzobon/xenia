@@ -98,6 +98,8 @@ class StfsContainerDevice : public Device {
     return 2;
   }
 
+  StfsHeader& header() { return header_; }
+
  protected:
   friend class StfsContainerEntry;
   void STFSBlockMarkDirty(uint32_t block_num);
