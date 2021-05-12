@@ -79,9 +79,11 @@ XEPACKEDSTRUCT(StfsVolumeDescriptor, {
 static_assert_size(StfsVolumeDescriptor, 0x24);
 
 enum class StfsHashState : uint8_t {
-  kFree = 0,   // unallocated but doesn't exist in package (needs to expand)?
-  kFree2 = 1,  // unallocated but exists in package?
+  // TODO: find out difference between Free/Free2 & InUse/InUse2...
+  kFree = 0,
+  kFree2 = 1,
   kInUse = 2,
+  kInUse2 = 3
 };
 
 struct StfsHashEntry {
@@ -101,11 +103,13 @@ struct StfsHashEntry {
     info_raw = (info_raw & ~0xC0000000) | (uint32_t(value) << 30);
   }
 
+  // Counts number of blocks with StfsHashState = kFree / 0
   uint32_t levelN_num_blocks_free() const { return info_raw & 0x7FFF; }
   void set_levelN_num_blocks_free(uint32_t value) {
     info_raw = (info_raw & ~0x7FFF) | (value & 0x7FFF);
   }
 
+  // Counts number of blocks with StfsHashState = kFree2 / 1 (0x40xxxxxx)
   uint32_t levelN_num_blocks_unk() const {
     return ((info_raw & 0x3FFF8000) >> 15) & 0x7FFF;
   }

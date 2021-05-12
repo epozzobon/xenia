@@ -169,13 +169,13 @@ class StfsContainerDevice : public Device {
                                           uint32_t hash_level) const;
 
   StfsHashTable& STFSGetHashTable(uint32_t block_num, uint32_t hash_level,
-                                  uint8_t* hash_in_out,
-                                  bool use_secondary_block,
-                                  bool* is_table_invalid);
+                                  bool use_secondary_block = false,
+                                  uint8_t* hash_in_out = nullptr,
+                                  bool* is_table_invalid = nullptr);
 
   StfsHashEntry& STFSGetHashEntry(uint32_t block_num, uint32_t hash_level,
-                                  uint8_t* hash_in_out,
-                                  bool use_secondary_block);
+                                  bool use_secondary_block = false,
+                                  uint8_t* hash_in_out = nullptr);
 
   // DataHash functions handle secondary block & hash checking for us
   StfsHashTable& STFSGetDataHashTable(uint32_t block_num,

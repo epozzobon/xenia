@@ -638,8 +638,7 @@ bool StfsContainerDevice::STFSFlush() {
 
       auto& hash_table = hash_level == 0
                              ? STFSGetDataHashTable(block_num, nullptr)
-                             : STFSGetHashTable(block_num, hash_level, nullptr,
-                                                false, nullptr);
+                             : STFSGetHashTable(block_num, hash_level);
 
       auto& entry = hash_table.entries[entry_num];
 
@@ -1052,8 +1051,8 @@ uint64_t StfsContainerDevice::STFSDataBlockToHashBlockOffset(
 
 StfsHashTable& StfsContainerDevice::STFSGetHashTable(uint32_t block_num,
                                                      uint32_t hash_level,
-                                                     uint8_t* hash_in_out,
                                                      bool use_secondary_block,
+                                                     uint8_t* hash_in_out,
                                                      bool* is_table_invalid) {
   uint64_t table_key = STFSDataBlockToHashBlockOffset(block_num, hash_level);
 
@@ -1108,11 +1107,11 @@ StfsHashTable& StfsContainerDevice::STFSGetHashTable(uint32_t block_num,
 
 StfsHashEntry& StfsContainerDevice::STFSGetHashEntry(uint32_t block_num,
                                                      uint32_t hash_level,
-                                                     uint8_t* hash_in_out,
-                                                     bool use_secondary_block) {
+                                                     bool use_secondary_block,
+                                                     uint8_t* hash_in_out) {
   bool invalid_table = false;
-  auto hash_table = STFSGetHashTable(block_num, hash_level, hash_in_out,
-                                     use_secondary_block, &invalid_table);
+  auto hash_table = STFSGetHashTable(block_num, hash_level, use_secondary_block,
+                                     hash_in_out, &invalid_table);
 
   uint32_t entry_num = block_num;
   if (hash_level > 0) {
@@ -1157,7 +1156,7 @@ StfsHashTable& StfsContainerDevice::STFSGetDataHashTable(
 
   if (num_blocks >= kBlocksPerHashLevel[1]) {
     // Get the L2 entry for the block
-    auto l2_entry = STFSGetHashEntry(block_num, 2, hash, use_secondary_block);
+    auto l2_entry = STFSGetHashEntry(block_num, 2, use_secondary_block, hash);
     use_secondary_block = false;
     if (l2_entry.levelN_active_index() && blocks_per_hash_table_ > 1) {
       use_secondary_block = true;
@@ -1170,7 +1169,7 @@ StfsHashTable& StfsContainerDevice::STFSGetDataHashTable(
 
   if (num_blocks >= kBlocksPerHashLevel[0]) {
     // Get the L1 entry for this block
-    auto l1_entry = STFSGetHashEntry(block_num, 1, hash, use_secondary_block);
+    auto l1_entry = STFSGetHashEntry(block_num, 1, use_secondary_block, hash);
     use_secondary_block = false;
     if (l1_entry.levelN_active_index() && blocks_per_hash_table_ > 1) {
       use_secondary_block = true;
@@ -1181,7 +1180,7 @@ StfsHashTable& StfsContainerDevice::STFSGetDataHashTable(
     }
   }
 
-  return STFSGetHashTable(block_num, 0, hash, use_secondary_block,
+  return STFSGetHashTable(block_num, 0, use_secondary_block, hash,
                           is_table_invalid);
 }
 
@@ -1223,9 +1222,7 @@ void StfsContainerDevice::STFSSetDataHashEntry(
 }
 
 void StfsContainerDevice::STFSBlockMarkDirty(uint32_t block_num) {
-  bool already_exists = std::find(dirty_blocks_.begin(), dirty_blocks_.end(),
-                                  block_num) != dirty_blocks_.end();
-  if (!already_exists) {
+  if (!STFSBlockIsMarkedDirty(block_num)) {
     dirty_blocks_.push_back(block_num);
   }
 }
@@ -1248,6 +1245,15 @@ void StfsContainerDevice::STFSBlockFree(uint32_t block_num) {
   STFSBlockMarkDirty(block_num);
 
   header_.metadata.volume_descriptor.stfs.free_block_count++;
+
+  // Update upper-level hash block flags if we have them
+  for (uint32_t hash_level = 1; hash_level <= STFSMaxHashLevel();
+       hash_level++) {
+    auto upper_entry = STFSGetHashEntry(block_num, hash_level);
+
+    auto num_free = upper_entry.levelN_num_blocks_free();
+    upper_entry.set_levelN_num_blocks_free(num_free + 1);
+  }
 }
 
 uint32_t StfsContainerDevice::STFSBlockAllocate() {
@@ -1255,8 +1261,18 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
     return -1;  // can't modify read-only package!
   }
 
+  uint32_t block_num = -1;
+
+  // Store existing block state if the block is part of free_block_count
+  StfsHashState block_state = StfsHashState::kInUse;
+  bool is_new_block = false;
+
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
-  if (descriptor.free_block_count > 0) {
+  if (descriptor.free_block_count <= 0) {
+    // No unused blocks available, need to add new one ourselves
+    block_num = descriptor.total_block_count++;
+    is_new_block = true;
+  } else {
     // Apparently we have an unused block already allocated, hunt it down...
 
     uint32_t cur_block = 0;
@@ -1269,32 +1285,73 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
 
       for (uint32_t n = 0; n < blocks_in_table; n++) {
         auto& entry = hash_table.entries[n];
-        if (entry.level0_allocation_state() != StfsHashState::kInUse) {
-          entry.set_level0_allocation_state(StfsHashState::kInUse);
-          entry.set_level0_next_block(kEndOfChain);
 
-          uint32_t block_num = cur_block + n;
-          STFSBlockMarkDirty(block_num);
+        auto state = entry.level0_allocation_state();
+        if (block_state != StfsHashState::kInUse &&
+            block_state != StfsHashState::kInUse2) {
+          // Found a block to use!
+          block_num = cur_block + n;
+          block_state = state;
+
           descriptor.free_block_count--;
-          return block_num;
+          break;
         }
+      }
+
+      if (block_num != -1) {
+        break;
       }
 
       cur_block += kBlocksPerHashLevel[0];
     }
   }
 
-  // No unused blocks available, need to add new one ourselves...
-  uint32_t block_num = descriptor.total_block_count++;
+  if (block_num == -1) {
+    XELOGE("STFSBlockAllocate failed to find valid empty block!");
+    assert_always();
+    return -1;
+  }
 
-  // Allocate space for the new block
-  xe::filesystem::Seek(main_file(), STFSDataBlockToOffset(block_num), SEEK_SET);
+  // Make sure there's enough space for the block
+  if (is_new_block) {
+    xe::filesystem::Seek(
+        main_file(), STFSDataBlockToOffset(block_num) + kBlockSize, SEEK_SET);
+  }
 
-  // Set new block hash entry, will also mark block as dirty
+  // Set block hash entry, will also mark block as dirty
   StfsHashEntry entry = {0};
   entry.set_level0_allocation_state(StfsHashState::kInUse);
   entry.set_level0_next_block(kEndOfChain);
   STFSSetDataHashEntry(block_num, entry);
+
+  // Update upper-level hash block flags if we have them
+  uint32_t entry_num = block_num;
+  for (uint32_t hash_level = 1; hash_level <= STFSMaxHashLevel();
+       hash_level++) {
+    entry_num = entry_num / kBlocksPerHashLevel[0];
+
+    auto upper_table = STFSGetHashTable(block_num, hash_level);
+    if (is_new_block) {
+      upper_table.num_blocks++;
+    }
+
+    // TODO: this if statement should probably be removed, and we should
+    // count the kFree/kFree2 in each levelN hash block instead, in order to
+    // handle any newly created hash blocks properly...
+    if (!is_new_block) {
+      auto& upper_entry =
+          upper_table.entries[entry_num % kBlocksPerHashLevel[0]];
+      auto num_free = upper_entry.levelN_num_blocks_free();
+      if (block_state == StfsHashState::kFree && num_free > 0) {
+        upper_entry.set_levelN_num_blocks_free(num_free - 1);
+      } else {
+        auto num_free2 = upper_entry.levelN_num_blocks_unk();
+        if (block_state == StfsHashState::kFree2 && num_free2 > 0) {
+          upper_entry.set_levelN_num_blocks_unk(num_free2 - 1);
+        }
+      }
+    }
+  }
 
   return block_num;
 }
