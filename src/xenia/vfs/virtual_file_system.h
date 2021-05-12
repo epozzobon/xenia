@@ -21,6 +21,14 @@
 #include "xenia/vfs/file.h"
 
 namespace xe {
+namespace kernel {
+namespace xam {
+class ContentPackage;
+}  // namespace xam
+}  // namespace kernel
+}  // namespace xe
+
+namespace xe {
 namespace vfs {
 
 class VirtualFileSystem {
@@ -46,6 +54,11 @@ class VirtualFileSystem {
                     uint32_t desired_access, bool is_directory,
                     bool is_non_directory, File** out_file,
                     FileAction* out_action);
+
+ protected:
+  friend class xe::kernel::xam::ContentPackage;
+
+  Device* ResolveDevice(const std::string_view path);
 
  private:
   xe::global_critical_region global_critical_region_;

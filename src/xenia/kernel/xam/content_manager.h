@@ -131,6 +131,9 @@ class ContentPackage {
 
   const XCONTENT_DATA& GetPackageContentData() const { return content_data_; }
 
+  void SetThumbnail(const std::vector<uint8_t>& data);
+  void GetThumbnail(std::vector<uint8_t>* data);
+
  private:
   KernelState* kernel_state_;
   std::string root_name_;

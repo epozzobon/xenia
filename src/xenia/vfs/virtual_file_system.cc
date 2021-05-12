@@ -126,6 +126,17 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
   return device->ResolvePath(relative_path);
 }
 
+Device* VirtualFileSystem::ResolveDevice(const std::string_view path) {
+  auto global_lock = global_critical_region_.Acquire();
+  for (auto it = devices_.begin(); it != devices_.end(); ++it) {
+    if ((*it)->mount_path() == path) {
+      return (*it).get();
+    }
+  }
+  XELOGE("ResolveDevice({}) failed - device not found", path);
+  return nullptr;
+}
+
 Entry* VirtualFileSystem::CreatePath(const std::string_view path,
                                      uint32_t attributes) {
   // Create all required directories recursively.

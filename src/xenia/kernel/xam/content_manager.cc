@@ -51,6 +51,36 @@ ContentPackage::~ContentPackage() {
   fs->UnregisterDevice(device_path_);
 }
 
+void ContentPackage::SetThumbnail(const std::vector<uint8_t>& data) {
+  auto device_base = kernel_state_->file_system()->ResolveDevice(device_path_);
+  if (!device_base) {
+    return;
+  }
+
+  auto& header =
+      reinterpret_cast<vfs::StfsContainerDevice*>(device_base)->header();
+
+  auto thumb_length =
+      std::min(data.size(), size_t(vfs::XContentMetadata::kThumbLengthV2));
+  memcpy(header.metadata.thumbnail, data.data(), thumb_length);
+  header.metadata.thumbnail_size = uint32_t(thumb_length);
+}
+
+void ContentPackage::GetThumbnail(std::vector<uint8_t>* data) {
+  auto device_base = kernel_state_->file_system()->ResolveDevice(device_path_);
+  if (!device_base) {
+    return;
+  }
+
+  auto& header =
+      reinterpret_cast<vfs::StfsContainerDevice*>(device_base)->header();
+
+  auto thumb_length = std::min(uint32_t(header.metadata.thumbnail_size),
+                               vfs::XContentMetadata::kThumbLengthV2);
+  data->resize(thumb_length);
+  memcpy(data->data(), header.metadata.thumbnail, thumb_length);
+}
+
 ContentManager::ContentManager(KernelState* kernel_state,
                                const std::filesystem::path& root_path)
     : kernel_state_(kernel_state), root_path_(root_path) {}
@@ -222,6 +252,19 @@ X_RESULT ContentManager::GetContentThumbnail(const XCONTENT_DATA& data,
     return X_ERROR_FILE_NOT_FOUND;
   }
 
+  auto package =
+      std::find_if(open_packages_.cbegin(), open_packages_.cend(),
+                   [data](std::pair<string_key, ContentPackage*> content) {
+                     return data == content.second->GetPackageContentData();
+                   });
+
+  if (package != std::end(open_packages_)) {
+    // Package was found in open_packages_
+
+    package->second->GetThumbnail(buffer);
+    return X_ERROR_SUCCESS;
+  }
+
   auto file = xe::filesystem::OpenFile(package_path, "rb");
   auto header = std::make_unique<vfs::StfsHeader>();
   if (fread(header.get(), sizeof(vfs::StfsHeader), 1, file) != 1) {
@@ -246,9 +289,6 @@ X_RESULT ContentManager::SetContentThumbnail(const XCONTENT_DATA& data,
     return X_ERROR_FILE_NOT_FOUND;
   }
 
-  auto thumb_size =
-      std::min(uint32_t(buffer.size()), vfs::XContentMetadata::kThumbLengthV2);
-
   auto package =
       std::find_if(open_packages_.cbegin(), open_packages_.cend(),
                    [data](std::pair<string_key, ContentPackage*> content) {
@@ -258,7 +298,7 @@ X_RESULT ContentManager::SetContentThumbnail(const XCONTENT_DATA& data,
   if (package != std::end(open_packages_)) {
     // Package was found in open_packages_
 
-    // TODO: how to get the StfsContainerDevice from a ContentPackage?
+    package->second->SetThumbnail(buffer);
     return X_ERROR_SUCCESS;
   }
 
@@ -275,6 +315,9 @@ X_RESULT ContentManager::SetContentThumbnail(const XCONTENT_DATA& data,
     fclose(file);
     return X_ERROR_FILE_NOT_FOUND;
   }
+
+  auto thumb_size =
+      std::min(uint32_t(buffer.size()), vfs::XContentMetadata::kThumbLengthV2);
 
   header->metadata.thumbnail_size = thumb_size;
   memcpy(header->metadata.thumbnail, buffer.data(), thumb_size);
