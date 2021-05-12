@@ -33,13 +33,14 @@ class StfsContainerDevice : public Device {
 
   StfsContainerDevice(const std::string_view mount_path,
                       const std::filesystem::path& host_path,
-                      bool create = false);
+                      bool read_only = false, bool create = false);
   ~StfsContainerDevice() override;
 
   bool Initialize() override;
 
   bool is_read_only() const override {
-    return header_.metadata.volume_type != XContentVolumeType::kStfs ||
+    return !allow_writing_ ||
+           header_.metadata.volume_type != XContentVolumeType::kStfs ||
            header_.metadata.volume_descriptor.stfs.flags.bits.read_only_format;
   }
 
@@ -186,6 +187,7 @@ class StfsContainerDevice : public Device {
 
   std::string name_;
   std::filesystem::path host_path_;
+  bool allow_writing_ = false;
   bool allow_creating_ = false;
 
   std::map<size_t, FILE*> files_;

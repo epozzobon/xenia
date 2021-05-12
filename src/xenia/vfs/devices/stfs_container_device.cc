@@ -67,10 +67,11 @@ std::tuple<uint32_t, uint32_t> encode_fat_timestamp(uint64_t timestamp) {
 
 StfsContainerDevice::StfsContainerDevice(const std::string_view mount_path,
                                          const std::filesystem::path& host_path,
-                                         bool create)
+                                         bool read_only, bool create)
     : Device(mount_path),
       name_("STFS"),
       host_path_(host_path),
+      allow_writing_(!read_only),
       allow_creating_(create),
       files_total_size_(),
       svod_base_offset_(),
@@ -179,7 +180,7 @@ StfsContainerDevice::Error StfsContainerDevice::OpenFiles() {
   if (std::filesystem::exists(host_path_)) {
     header_file = xe::filesystem::OpenFile(host_path_, "rb+");
   } else {
-    if (allow_creating_) {
+    if (allow_writing_) {
       header_file = xe::filesystem::OpenFile(host_path_, "wb+");
     } else {
       XELOGE("Error opening STFS header file, file doesn't exist");
@@ -686,13 +687,14 @@ bool StfsContainerDevice::STFSFlush() {
   // Update header hash/content ID
   // Seek to start of header_.metadata
   xe::filesystem::Seek(package_file, StfsHeader::kMetadataOffset, SEEK_SET);
-  auto metadata_buf =
-      std::make_unique<uint8_t[]>(StfsHeader::kMetadataHashedDataLength);
-  fread(metadata_buf.get(), 1, StfsHeader::kMetadataHashedDataLength,
-        package_file);
+
+  auto metadata_size = xe::round_up(header_.header.header_size, kBlockSize) -
+                       StfsHeader::kMetadataOffset;
+  auto metadata_buf = std::make_unique<uint8_t[]>(metadata_size);
+  fread(metadata_buf.get(), 1, metadata_size, package_file);
 
   sha = sha1::SHA1();
-  sha.processBytes(metadata_buf.get(), StfsHeader::kMetadataHashedDataLength);
+  sha.processBytes(metadata_buf.get(), metadata_size);
   sha.finalize(header_.header.content_id);
 
   xe::filesystem::Seek(package_file, 0, SEEK_SET);
@@ -714,9 +716,7 @@ void StfsContainerDevice::FlattenChildEntries(
 }
 
 void StfsContainerDevice::STFSDirectoryWrite() {
-  auto& descriptor = header_.metadata.volume_descriptor.stfs;
-
-  if (descriptor.flags.bits.read_only_format) {
+  if (is_read_only()) {
     // Read-only package.
     return;
   }
@@ -736,6 +736,7 @@ void StfsContainerDevice::STFSDirectoryWrite() {
   auto num_blocks =
       bytes_to_stfs_blocks(all_entries.size() * sizeof(StfsDirectoryEntry));
 
+  auto& descriptor = header_.metadata.volume_descriptor.stfs;
   auto directory_block = descriptor.file_table_block_number();
 
   // We could skip STFSBlockAllocate if num_blocks <= 0, but it's good to always

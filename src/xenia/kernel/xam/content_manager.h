@@ -126,7 +126,7 @@ class ContentPackage {
   ContentPackage(KernelState* kernel_state, const std::string_view root_name,
                  const XCONTENT_DATA& data,
                  const std::filesystem::path& package_path,
-                 bool create = false);
+                 bool read_only = false, bool create = false);
   ~ContentPackage();
 
   const XCONTENT_DATA& GetPackageContentData() const { return content_data_; }
@@ -149,7 +149,7 @@ class ContentManager {
 
   std::unique_ptr<ContentPackage> ResolvePackage(
       const std::string_view root_name, const XCONTENT_DATA& data,
-      bool create = false);
+      bool read_only = false, bool create = false);
 
   bool ContentExists(const XCONTENT_DATA& data);
   X_RESULT CreateContent(const std::string_view root_name,

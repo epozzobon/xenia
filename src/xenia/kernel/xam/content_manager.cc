@@ -32,14 +32,14 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
                                const std::string_view root_name,
                                const XCONTENT_DATA& data,
                                const std::filesystem::path& package_path,
-                               bool create)
+                               bool read_only, bool create)
     : kernel_state_(kernel_state), root_name_(root_name) {
   device_path_ = fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_);
   content_data_ = data;
 
   auto fs = kernel_state_->file_system();
   auto device = std::make_unique<vfs::StfsContainerDevice>(
-      device_path_, package_path, create);
+      device_path_, package_path, read_only, create);
   device->Initialize();
   fs->RegisterDevice(std::move(device));
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
@@ -106,9 +106,10 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
       continue;
     }
 
+    // Open device as read-only so that flushing etc isn't performed
     auto device = std::make_unique<vfs::StfsContainerDevice>(
         fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_),
-        file_path);
+        file_path, true);
     device->Initialize();
 
     XCONTENT_DATA content_data;
@@ -125,7 +126,8 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
 }
 
 std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
-    const std::string_view root_name, const XCONTENT_DATA& data, bool create) {
+    const std::string_view root_name, const XCONTENT_DATA& data, bool read_only,
+    bool create) {
   auto package_path = ResolvePackagePath(data);
   if (!create && !std::filesystem::exists(package_path)) {
     return nullptr;
@@ -133,8 +135,8 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
 
   auto global_lock = global_critical_region_.Acquire();
 
-  auto package = std::make_unique<ContentPackage>(kernel_state_, root_name,
-                                                  data, package_path, create);
+  auto package = std::make_unique<ContentPackage>(
+      kernel_state_, root_name, data, package_path, read_only, create);
   return package;
 }
 
@@ -165,7 +167,7 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name,
     return X_ERROR_ACCESS_DENIED;
   }
 
-  auto package = ResolvePackage(root_name, data, true);
+  auto package = ResolvePackage(root_name, data, false, true);
   assert_not_null(package);
 
   open_packages_.insert({string_key::create(root_name), package.release()});
