@@ -81,7 +81,7 @@ class StfsContainerDevice : public Device {
     return files_total_size_ - sizeof(StfsHeader);
   }
 
-  uint32_t bytes_to_stfs_blocks(size_t num_bytes) const {
+  static uint32_t bytes_to_stfs_blocks(size_t num_bytes) {
     // xe::round_up doesn't handle 0 how we need it to, so:
     return uint32_t((num_bytes + kBlockSize - 1) / kBlockSize);
   }

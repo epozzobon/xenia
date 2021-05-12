@@ -74,7 +74,8 @@ bool StfsContainerEntry::is_read_only() {
 
 void StfsContainerEntry::UpdateBlockList() {
   auto device = reinterpret_cast<StfsContainerDevice*>(device_);
-  auto block_chain = device->STFSGetDataBlockChain(start_block_);
+  auto block_chain = device->STFSGetDataBlockChain(
+      start_block_, StfsContainerDevice::bytes_to_stfs_blocks(size_));
   UpdateBlockList(block_chain);
 }
 

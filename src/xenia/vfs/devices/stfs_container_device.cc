@@ -623,7 +623,7 @@ bool StfsContainerDevice::STFSFlush() {
     for (auto block_num : dirty_blocks_) {
       auto block_offset = hash_level == 0 ? STFSDataBlockToOffset(block_num)
                                           : STFSDataBlockToHashBlockOffset(
-                                                block_num, hash_level);
+                                                block_num, hash_level - 1);
 
       if (std::find(hashed_offsets.begin(), hashed_offsets.end(),
                     block_offset) != hashed_offsets.end()) {
@@ -642,11 +642,18 @@ bool StfsContainerDevice::STFSFlush() {
 
       auto& entry = hash_table.entries[entry_num];
 
-      xe::filesystem::Seek(package_file, block_offset, SEEK_SET);
-      fread(block_buf, 1, 0x1000, package_file);
+      auto* block_data = block_buf;
+      // If this is hashing a hash table we have in memory, hash the in-memory
+      // table instead
+      if (hash_level > 0 && hash_tables_.count(block_offset)) {
+        block_data = reinterpret_cast<uint8_t*>(&hash_tables_[block_offset]);
+      } else {
+        xe::filesystem::Seek(package_file, block_offset, SEEK_SET);
+        fread(block_buf, 1, 0x1000, package_file);
+      }
 
       sha1::SHA1 sha;
-      sha.processBytes(block_buf, 0x1000);
+      sha.processBytes(block_data, 0x1000);
       sha.finalize(entry.sha1);
 
       hashed_offsets.push_back(block_offset);
@@ -671,9 +678,24 @@ bool StfsContainerDevice::STFSFlush() {
   sha.processBytes(block_buf, 0x1000);
   sha.finalize(header_.metadata.volume_descriptor.stfs.top_hash_table_hash);
 
-  // Update XContent header
+  // Update XContent metadata
+  xe::filesystem::Seek(package_file, StfsHeader::kMetadataOffset, SEEK_SET);
+  fwrite(&header_.metadata, sizeof(header_.metadata), 1, package_file);
+
+  // Update header hash/content ID
+  // Seek to start of header_.metadata
+  xe::filesystem::Seek(package_file, StfsHeader::kMetadataOffset, SEEK_SET);
+  auto metadata_buf =
+      std::make_unique<uint8_t[]>(StfsHeader::kMetadataHashedDataLength);
+  fread(metadata_buf.get(), 1, StfsHeader::kMetadataHashedDataLength,
+        package_file);
+
+  sha = sha1::SHA1();
+  sha.processBytes(metadata_buf.get(), StfsHeader::kMetadataHashedDataLength);
+  sha.finalize(header_.header.content_id);
+
   xe::filesystem::Seek(package_file, 0, SEEK_SET);
-  fwrite(&header_, sizeof(header_), 1, package_file);
+  fwrite(&header_.header, sizeof(header_.header), 1, package_file);
 
   // Finish with a fflush
   fflush(package_file);
@@ -874,7 +896,15 @@ bool StfsContainerDevice::STFSReadDirectory() {
       if (dir_entry.directory_index == 0xFFFF) {
         parent_entry = root_entry;
       } else {
-        parent_entry = all_entries[dir_entry.directory_index];
+        if (all_entries.size() > dir_entry.directory_index) {
+          parent_entry = all_entries[dir_entry.directory_index];
+        } else {
+          XELOGE(
+              "STFSReadDirectory: directory entry uses invalid directory index "
+              "{}!",
+              uint16_t(dir_entry.directory_index));
+          parent_entry = root_entry;
+        }
       }
 
       std::string name(reinterpret_cast<const char*>(dir_entry.name),
@@ -927,6 +957,9 @@ bool StfsContainerDevice::STFSReadDirectory() {
 std::vector<uint32_t> StfsContainerDevice::STFSGetDataBlockChain(
     uint32_t block_num, uint32_t max_count) {
   std::vector<uint32_t> block_chain;
+  if (!max_count) {
+    max_count++;
+  }
 
   uint32_t cur_block = block_num;
   for (uint32_t cur_idx = 0; cur_idx < max_count; cur_idx++) {
@@ -1077,7 +1110,24 @@ StfsHashTable& StfsContainerDevice::STFSGetHashTable(uint32_t block_num,
 
     auto package_file = main_file();
     xe::filesystem::Seek(package_file, table_offset, SEEK_SET);
-    fread(&hash_table, sizeof(hash_table), 1, package_file);
+    if (!fread(&hash_table, sizeof(hash_table), 1, package_file)) {
+      // hash table is being created...
+
+      // L1/L2 table needs to be populated if cur_block doesn't belong to the
+      // first entry of it
+      uint32_t entry_num = block_num;
+      if (hash_level > 0) {
+        entry_num /= kBlocksPerHashLevel[hash_level - 1];
+        entry_num %= kBlocksPerHashLevel[0];
+
+        // Populate table by marking data blocks for the hash entries prior to
+        // this as dirty
+        for (uint32_t dirty_num = 0; dirty_num < entry_num; dirty_num++) {
+          auto dirty_block_num = dirty_num * kBlocksPerHashLevel[hash_level];
+          STFSBlockMarkDirty(dirty_block_num);
+        }
+      }
+    }
 
     hash_tables_[table_key] = hash_table;
 
@@ -1154,7 +1204,7 @@ StfsHashTable& StfsContainerDevice::STFSGetDataHashTable(
   // possibly salvage) these...
   auto num_blocks = descriptor.stfs.total_block_count;
 
-  if (num_blocks >= kBlocksPerHashLevel[1]) {
+  if (num_blocks > kBlocksPerHashLevel[1]) {
     // Get the L2 entry for the block
     auto l2_entry = STFSGetHashEntry(block_num, 2, use_secondary_block, hash);
     use_secondary_block = false;
@@ -1167,7 +1217,7 @@ StfsHashTable& StfsContainerDevice::STFSGetDataHashTable(
     }
   }
 
-  if (num_blocks >= kBlocksPerHashLevel[0]) {
+  if (num_blocks > kBlocksPerHashLevel[0]) {
     // Get the L1 entry for this block
     auto l1_entry = STFSGetHashEntry(block_num, 1, use_secondary_block, hash);
     use_secondary_block = false;
@@ -1312,12 +1362,6 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
     return -1;
   }
 
-  // Make sure there's enough space for the block
-  if (is_new_block) {
-    xe::filesystem::Seek(
-        main_file(), STFSDataBlockToOffset(block_num) + kBlockSize, SEEK_SET);
-  }
-
   // Set block hash entry, will also mark block as dirty
   StfsHashEntry entry = {0};
   entry.set_level0_allocation_state(StfsHashState::kInUse);
@@ -1351,6 +1395,19 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
         }
       }
     }
+  }
+
+  // Make sure there's enough space for the block
+  auto package_file = main_file();
+  xe::filesystem::Seek(package_file, 0L, SEEK_END);
+  files_total_size_ = xe::filesystem::Tell(package_file);
+
+  auto new_block_end = STFSDataBlockToOffset(block_num) + kBlockSize;
+  if (new_block_end > files_total_size_) {
+    // Increase package size with TruncateStdioFile
+    xe::filesystem::Seek(package_file, 0, SEEK_SET);
+    xe::filesystem::TruncateStdioFile(package_file, new_block_end);
+    files_total_size_ = new_block_end;
   }
 
   return block_num;

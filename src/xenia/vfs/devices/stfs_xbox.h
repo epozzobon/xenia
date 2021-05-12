@@ -456,8 +456,14 @@ XEPACKEDSTRUCT(XContentHeader, {
 static_assert_size(XContentHeader, 0x344);
 
 struct StfsHeader {
+  static const uint32_t kMetadataOffset = 0x344;
+  static const uint32_t kHeaderEndOffset = 0xA000;
+  static const uint32_t kMetadataHashedDataLength =
+      kHeaderEndOffset - kMetadataOffset;
+
   XContentHeader header;
   XContentMetadata metadata;
+
   // TODO: title/system updates contain more data after XContentMetadata, seems
   // to affect header.header_size
 
