@@ -455,18 +455,47 @@ XEPACKEDSTRUCT(XContentHeader, {
 });
 static_assert_size(XContentHeader, 0x344);
 
-struct StfsHeader {
+struct XContentMetadataTitleUpdate {
+  be<uint32_t> unknown;
+  be<uint32_t> new_version_raw;
+  uint8_t unused[0x15E8];
+
+  xex2_version new_version() const { return xex2_version{new_version_raw}; }
+
+  void set_new_version(xex2_version version) {
+    new_version_raw = version.value;
+  }
+};
+static_assert_size(XContentMetadataTitleUpdate, 0x15F0);
+
+// Only included in StfsHeader if header.header_size == 0xAD0E (LIVE/PIRS only)
+struct XContentMetadataExtra {
+  be<uint32_t> metadata_type;
+  union {
+    XContentMetadataTitleUpdate title_update;
+    // TODO: system_update
+  } metadata;
+};
+static_assert_size(XContentMetadataExtra, 0x15F4);
+
+XEPACKEDSTRUCT(StfsHeader, {
   static const uint32_t kMetadataOffset = 0x344;
+  static const uint32_t kSizeBasic = 0x971A;
+  static const uint32_t kSizeWithExtra =
+      kSizeBasic + sizeof(XContentMetadataExtra);
 
   XContentHeader header;
   XContentMetadata metadata;
 
-  // TODO: title/system updates contain more data after XContentMetadata, seems
-  // to affect header.header_size
+  XContentMetadataExtra extra_metadata;
+
+  bool has_extra_metadata() const { return header.header_size > kSizeBasic; }
 
   void set_defaults() {
     header.magic = XContentPackageType::kCon;
-    header.header_size = sizeof(StfsHeader);
+
+    // CON doesn't contain XContentMetadataExtra
+    header.header_size = sizeof(StfsHeader) - sizeof(XContentMetadataExtra);
 
     metadata.metadata_version = 2;
     metadata.volume_type = XContentVolumeType::kStfs;
@@ -474,8 +503,8 @@ struct StfsHeader {
         sizeof(StfsVolumeDescriptor);
     metadata.volume_descriptor.stfs.file_table_block_count = 0;
   }
-};
-static_assert_size(StfsHeader, 0x971A);
+});
+static_assert_size(StfsHeader, 0xAD0E);
 
 }  // namespace vfs
 }  // namespace xe

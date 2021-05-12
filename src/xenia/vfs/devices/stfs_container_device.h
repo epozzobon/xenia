@@ -156,10 +156,6 @@ class StfsContainerDevice : public Device {
                       StfsContainerEntry* parent);
   void BlockToOffsetSVOD(size_t sector, size_t* address, size_t* file_index);
 
-  // Recursively flattens the entry tree to a list of entries
-  void FlattenChildEntries(StfsContainerEntry* entry,
-                           std::vector<StfsContainerEntry*>* entry_list);
-
   bool STFSDirectoryRead();
   void STFSDirectoryWrite();
 

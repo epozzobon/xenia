@@ -272,13 +272,21 @@ StfsContainerDevice::Error StfsContainerDevice::ReadHeaderAndVerify(
   files_total_size_ = xe::filesystem::Tell(header_file);
   xe::filesystem::Seek(header_file, 0L, SEEK_SET);
 
-  if (files_total_size_ >= sizeof(StfsHeader)) {
-    // Read header & check signature
-    fread(&header_, sizeof(StfsHeader), 1, header_file);
+  if (files_total_size_ >= StfsHeader::kSizeBasic) {
+    // Read header & check magic
+    memset(&header_, 0, sizeof(StfsHeader));
+    fread(&header_, StfsHeader::kSizeBasic, 1, header_file);
 
     if (!header_.header.is_magic_valid()) {
       // Unexpected format.
       return Error::kErrorFileMismatch;
+    }
+
+    // Read in extra metadata if package has it
+    if (header_.has_extra_metadata() &&
+        files_total_size_ >= header_.header.header_size) {
+      xe::filesystem::Seek(header_file, 0L, SEEK_SET);
+      fread(&header_, header_.header.header_size, 1, header_file);
     }
   } else {
     header_.set_defaults();
@@ -705,14 +713,17 @@ bool StfsContainerDevice::STFSFlush() {
 
   sha1::SHA1 sha;
   sha.processBytes(block_buf, 0x1000);
-  sha.finalize(header_.metadata.volume_descriptor.stfs.top_hash_table_hash);
+  sha.finalize(descriptor.top_hash_table_hash);
+
+  // Unset root_active_index, we always write hash-tables into primary block
+  descriptor.flags.bits.root_active_index = false;
 
   // Update XContent metadata
-  xe::filesystem::Seek(package_file, StfsHeader::kMetadataOffset, SEEK_SET);
-  fwrite(&header_.metadata, sizeof(header_.metadata), 1, package_file);
+  xe::filesystem::Seek(package_file, 0, SEEK_SET);
+  fwrite(&header_, header_.header.header_size, 1, package_file);
 
   // Update header hash/content ID
-  // Seek to start of header_.metadata
+  // Seek to start of header_.metadata & read in the complete hashed-area
   xe::filesystem::Seek(package_file, StfsHeader::kMetadataOffset, SEEK_SET);
 
   auto metadata_size = xe::round_up(header_.header.header_size, kBlockSize) -
@@ -733,9 +744,10 @@ bool StfsContainerDevice::STFSFlush() {
   return true;
 }
 
-void StfsContainerDevice::FlattenChildEntries(
-    StfsContainerEntry* entry, std::vector<StfsContainerEntry*>* entry_list) {
-  for (auto& child : entry->children_) {
+// Recursively flattens the entry tree to a list of entries
+void FlattenChildEntries(StfsContainerEntry* entry,
+                         std::vector<StfsContainerEntry*>* entry_list) {
+  for (auto& child : entry->children()) {
     auto* child_entry = reinterpret_cast<StfsContainerEntry*>(child.get());
     entry_list->push_back(child_entry);
     FlattenChildEntries(child_entry, entry_list);
@@ -1326,15 +1338,6 @@ void StfsContainerDevice::STFSBlockFree(uint32_t block_num) {
   STFSBlockMarkDirty(block_num);
 
   header_.metadata.volume_descriptor.stfs.free_block_count++;
-
-  // Update upper-level hash block flags if we have them
-  for (uint32_t hash_level = 1; hash_level <= STFSMaxHashLevel();
-       hash_level++) {
-    auto upper_entry = STFSGetHashEntry(block_num, hash_level);
-
-    auto num_free = upper_entry.levelN_num_blocks_free();
-    upper_entry.set_levelN_num_blocks_free(num_free + 1);
-  }
 }
 
 uint32_t StfsContainerDevice::STFSBlockAllocate() {
@@ -1398,35 +1401,6 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
   entry.set_level0_allocation_state(StfsHashState::kInUse);
   entry.set_level0_next_block(kEndOfChain);
   STFSSetDataHashEntry(block_num, entry);
-
-  // Update upper-level hash block flags if we have them
-  uint32_t entry_num = block_num;
-  for (uint32_t hash_level = 1; hash_level <= STFSMaxHashLevel();
-       hash_level++) {
-    entry_num = entry_num / kBlocksPerHashLevel[0];
-
-    auto upper_table = STFSGetHashTable(block_num, hash_level);
-    if (is_new_block) {
-      upper_table.num_blocks++;
-    }
-
-    // TODO: this if statement should probably be removed, and we should
-    // count the kFree/kFree2 in each levelN hash block instead, in order to
-    // handle any newly created hash blocks properly...
-    if (!is_new_block) {
-      auto& upper_entry =
-          upper_table.entries[entry_num % kBlocksPerHashLevel[0]];
-      auto num_free = upper_entry.levelN_num_blocks_free();
-      if (block_state == StfsHashState::kFree && num_free > 0) {
-        upper_entry.set_levelN_num_blocks_free(num_free - 1);
-      } else {
-        auto num_free2 = upper_entry.levelN_num_blocks_unk();
-        if (block_state == StfsHashState::kFree2 && num_free2 > 0) {
-          upper_entry.set_levelN_num_blocks_unk(num_free2 - 1);
-        }
-      }
-    }
-  }
 
   // Make sure there's enough space for the block
   auto package_file = main_file();
