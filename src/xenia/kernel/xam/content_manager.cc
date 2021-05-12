@@ -221,15 +221,15 @@ X_RESULT ContentManager::GetContentThumbnail(const XCONTENT_DATA& data,
   }
 
   auto file = xe::filesystem::OpenFile(package_path, "rb");
-  vfs::StfsHeader header;
-  if (fread(&header, sizeof(header), 1, file) != 1) {
+  auto header = std::make_unique<vfs::StfsHeader>();
+  if (fread(header.get(), sizeof(vfs::StfsHeader), 1, file) != 1) {
     fclose(file);
     return X_ERROR_FILE_NOT_FOUND;
   }
-  auto thumb_size = std::min(uint32_t(header.metadata.thumbnail_size),
+  auto thumb_size = std::min(uint32_t(header->metadata.thumbnail_size),
                              vfs::XContentMetadata::kThumbLengthV2);
   buffer->resize(thumb_size);
-  memcpy(const_cast<uint8_t*>(buffer->data()), header.metadata.thumbnail,
+  memcpy(const_cast<uint8_t*>(buffer->data()), header->metadata.thumbnail,
          thumb_size);
 
   fclose(file);
@@ -268,14 +268,14 @@ X_RESULT ContentManager::SetContentThumbnail(const XCONTENT_DATA& data,
   // console support
 
   auto file = xe::filesystem::OpenFile(package_path, "rb+");
-  vfs::StfsHeader header;
-  if (fread(&header, sizeof(header), 1, file) != 1) {
+  auto header = std::make_unique<vfs::StfsHeader>();
+  if (fread(header.get(), sizeof(vfs::StfsHeader), 1, file) != 1) {
     fclose(file);
     return X_ERROR_FILE_NOT_FOUND;
   }
 
-  header.metadata.thumbnail_size = thumb_size;
-  memcpy(header.metadata.thumbnail, buffer.data(), thumb_size);
+  header->metadata.thumbnail_size = thumb_size;
+  memcpy(header->metadata.thumbnail, buffer.data(), thumb_size);
   fseek(file, 0, SEEK_SET);
   fwrite(&header, sizeof(header), 1, file);
   fclose(file);
