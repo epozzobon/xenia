@@ -15,6 +15,7 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/string.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/stfs_container_device.h"
 
@@ -87,14 +88,24 @@ ContentManager::ContentManager(KernelState* kernel_state,
 
 ContentManager::~ContentManager() = default;
 
+uint32_t ContentManager::title_id() const {
+  if (title_id_override_) {
+    return title_id_override_;
+  }
+  if (!kernel_state_->GetExecutableModule()) {
+    return -1;
+  }
+  return kernel_state_->title_id();
+}
+
 std::filesystem::path ContentManager::ResolvePackageRoot(
     XContentType content_type) {
-  auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
-  auto type_id = fmt::format("{:08X}", uint32_t(content_type));
+  auto title_id_str = fmt::format("{:08X}", title_id());
+  auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
 
   // Package root path:
   // content_root/title_id/type_id/
-  return root_path_ / title_id / type_id;
+  return root_path_ / title_id_str / content_type_str;
 }
 
 std::filesystem::path ContentManager::ResolvePackagePath(
@@ -344,12 +355,12 @@ X_RESULT ContentManager::DeleteContent(const XCONTENT_DATA& data) {
 }
 
 std::filesystem::path ContentManager::ResolveGameUserContentPath() {
-  auto title_id = fmt::format("{:8X}", kernel_state_->title_id());
+  auto title_id_str = fmt::format("{:8X}", title_id());
   auto user_name = xe::to_path(kernel_state_->user_profile()->name());
 
   // Per-game per-profile data location:
   // content_root/title_id/profile/user_name
-  return root_path_ / title_id / kGameUserContentDirName / user_name;
+  return root_path_ / title_id_str / kGameUserContentDirName / user_name;
 }
 
 bool ContentManager::IsContentOpen(const XCONTENT_DATA& data) const {

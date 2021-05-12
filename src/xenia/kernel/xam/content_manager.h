@@ -168,7 +168,11 @@ class ContentManager {
   std::filesystem::path ResolveGameUserContentPath();
   bool IsContentOpen(const XCONTENT_DATA& data) const;
 
+  void SetTitleIdOverride(uint32_t title_id) { title_id_override_ = title_id; }
+
  private:
+  uint32_t title_id() const;
+
   std::filesystem::path ResolvePackageRoot(XContentType content_type);
   std::filesystem::path ResolvePackagePath(const XCONTENT_DATA& data);
 
@@ -178,6 +182,11 @@ class ContentManager {
   // TODO(benvanik): remove use of global lock, it's bad here!
   xe::global_critical_region global_critical_region_;
   std::unordered_map<string_key, ContentPackage*> open_packages_;
+
+  // For allowing games to request content for other titles
+  // or loading content before executable module is fully ready (eg. title
+  // update packages)
+  uint32_t title_id_override_ = 0;
 };
 
 }  // namespace xam
