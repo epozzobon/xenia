@@ -150,6 +150,12 @@ bool StfsContainerDevice::Initialize() {
     return false;
   }
 
+  if (!allow_creating_ && !std::filesystem::exists(host_path_)) {
+    XELOGE("Path to STFS container does not exist: {}",
+           xe::path_to_utf8(host_path_));
+    return false;
+  }
+
   // Open the data file(s)
   auto open_result = OpenFiles();
   if (open_result != Error::kSuccess) {

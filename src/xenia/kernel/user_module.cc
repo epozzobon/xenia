@@ -22,6 +22,9 @@
 
 DEFINE_bool(xex_apply_patches, true, "Apply XEX patches.", "Kernel");
 
+// Root name to mount update packages to, games seem to check update:
+static const std::string kUpdatePartition = "update";
+
 namespace xe {
 namespace kernel {
 
@@ -112,7 +115,7 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
   auto content_manager = kernel_state()->content_manager();
 
   std::string unused;
-  if (!fs->FindSymbolicLink("update:", unused)) {
+  if (!fs->FindSymbolicLink(kUpdatePartition + ":", unused)) {
     // No update package currently loaded, check if we have any that are
     // applicable
 
@@ -123,21 +126,61 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
     xex2_opt_execution_info* exec_info = nullptr;
     xex_module()->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
 
-    if (kernel_state()->GetExecutableModule() || exec_info) {
-      // Only set override if we don't have an executable module yet
-      if (!kernel_state()->GetExecutableModule() && exec_info) {
+    xex2_opt_execution_info* exec_module_info = 0;
+    auto exe_module = kernel_state()->GetExecutableModule();
+    if (exe_module) {
+      exe_module->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_module_info);
+    }
+
+    if (exec_info || exec_module_info) {
+      // Only set override if we don't have an executable module yet/exe
+      // module doesn't have execution info
+      if (exec_info && !exec_module_info) {
         content_manager->SetTitleIdOverride(exec_info->title_id);
       }
 
       auto update_packages =
           content_manager->ListContent(0, XContentType::kInstaller);
 
-      for (auto& update : update_packages) {
-        auto result = content_manager->OpenContent("update", update);
+      auto stfs_header = std::make_unique<vfs::StfsHeader>();
 
-        if (!fs->ResolvePath("update:\\" + module_path + "p")) {
-          // XEXP/DLLP doesn't exist in this package, lets just close it
-          content_manager->CloseContent("update");
+      for (auto& update : update_packages) {
+        auto result = content_manager->OpenContent(kUpdatePartition, update);
+
+        if (result != X_ERROR_SUCCESS) {
+          continue;
+        }
+
+        if (exec_info || exec_module_info) {
+          result = content_manager->GetContentHeader(kUpdatePartition,
+                                                     stfs_header.get());
+          if (result == X_ERROR_SUCCESS) {
+            bool skip_package = true;
+            if (exec_info) {
+              // Check STFS execution info against our execution info
+              skip_package =
+                  memcmp(&stfs_header->metadata.execution_info, exec_info,
+                         sizeof(xex2_opt_execution_info)) != 0;
+            }
+
+            if (skip_package && exec_module_info) {
+              // If an executable module is loaded we'll check against that too
+              skip_package = memcmp(&stfs_header->metadata.execution_info,
+                                    exec_module_info,
+                                    sizeof(xex2_opt_execution_info)) != 0;
+            }
+
+            if (skip_package) {
+              // Execution info doesn't match, skip this package
+              content_manager->CloseContent(kUpdatePartition);
+              continue;
+            }
+          }
+        }
+
+        if (!fs->ResolvePath(kUpdatePartition + ":\\" + module_path + "p")) {
+          // XEXP/DLLP doesn't exist in this package, skip this package
+          content_manager->CloseContent(kUpdatePartition);
           continue;
         } else {
           // XEXP/DLLP found, break out of package loop
@@ -152,7 +195,8 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
   content_manager->SetTitleIdOverride(0);
 
   // Search for xexp patch file, first check if it exists at update:\ root
-  auto patch_entry = fs->ResolvePath("update:\\" + module_path + "p");
+  auto patch_entry =
+      fs->ResolvePath(kUpdatePartition + ":\\" + module_path + "p");
   if (!patch_entry) {
     // Try checking next to XEX itself
     auto patch_entry = fs->ResolvePath(path_ + "p");

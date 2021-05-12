@@ -178,6 +178,8 @@ class ContentManager {
   std::filesystem::path ResolveGameUserContentPath();
   bool IsContentOpen(const XCONTENT_DATA& data) const;
 
+  X_RESULT GetContentHeader(const std::string_view root_name,
+                            vfs::StfsHeader* result);
   void SetTitleIdOverride(uint32_t title_id) { title_id_override_ = title_id; }
 
  private:

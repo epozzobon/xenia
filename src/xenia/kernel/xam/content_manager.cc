@@ -399,6 +399,22 @@ bool ContentManager::IsContentOpen(const XCONTENT_DATA& data) const {
                      });
 }
 
+X_RESULT ContentManager::GetContentHeader(const std::string_view root_name,
+                                          vfs::StfsHeader* result) {
+  auto global_lock = global_critical_region_.Acquire();
+
+  auto it = open_packages_.find(string_key(root_name));
+  if (it == open_packages_.end()) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  vfs::StfsHeader* header = it->second->GetPackageHeader();
+  auto header_size = !header->header.header_size ? vfs::StfsHeader::kSizeBasic
+                                                 : header->header.header_size;
+  memcpy(result, header, header_size);
+  return X_ERROR_SUCCESS;
+}
+
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe
