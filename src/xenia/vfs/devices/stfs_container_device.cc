@@ -1336,9 +1336,10 @@ void StfsContainerDevice::STFSBlockFree(uint32_t block_num) {
     return;  // can't modify read-only package!
   }
 
-  auto hash_table = STFSGetDataHashTable(block_num, nullptr);
+  auto& hash_table = STFSGetDataHashTable(block_num, nullptr);
   auto entry_num = block_num % kBlocksPerHashLevel[0];
   auto& entry = hash_table.entries[entry_num];
+
   entry.set_level0_allocation_state(StfsHashState::kFree);
   entry.set_level0_next_block(kEndOfChain);
   STFSBlockMarkDirty(block_num);
@@ -1353,21 +1354,16 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
 
   uint32_t block_num = -1;
 
-  // Store existing block state if the block is part of free_block_count
-  StfsHashState block_state = StfsHashState::kInUse;
-  bool is_new_block = false;
-
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
   if (descriptor.free_block_count <= 0) {
     // No unused blocks available, need to add new one ourselves
     block_num = descriptor.total_block_count++;
-    is_new_block = true;
   } else {
     // Apparently we have an unused block already allocated, hunt it down...
 
     uint32_t cur_block = 0;
     while (cur_block < descriptor.total_block_count) {
-      auto hash_table = STFSGetDataHashTable(cur_block, nullptr);
+      auto& hash_table = STFSGetDataHashTable(cur_block, nullptr);
 
       uint32_t blocks_remain = descriptor.total_block_count - cur_block;
       uint32_t blocks_in_table =
@@ -1377,11 +1373,9 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
         auto& entry = hash_table.entries[n];
 
         auto state = entry.level0_allocation_state();
-        if (block_state != StfsHashState::kInUse &&
-            block_state != StfsHashState::kInUse2) {
+        if (state != StfsHashState::kInUse && state != StfsHashState::kInUse2) {
           // Found a block to use!
           block_num = cur_block + n;
-          block_state = state;
 
           descriptor.free_block_count--;
           break;
