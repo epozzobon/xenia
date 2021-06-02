@@ -53,8 +53,12 @@ bool StfsContainerEntry::set_length(uint32_t new_length) {
     start_block_ = device->STFSBlockAllocate();
   }
 
-  auto block_chain = device->STFSResizeDataBlockChain(
-      start_block_, device->bytes_to_stfs_blocks(new_length));
+  std::vector<uint32_t> block_chain;
+
+  if (start_block_ != -1) {
+    block_chain = device->STFSResizeDataBlockChain(
+        start_block_, device->bytes_to_stfs_blocks(new_length));
+  }
 
   size_ = new_length;
   if (new_length == 0) {

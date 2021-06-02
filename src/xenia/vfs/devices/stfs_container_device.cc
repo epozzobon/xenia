@@ -606,6 +606,9 @@ bool StfsContainerDevice::STFSFlush() {
   if (is_read_only()) {
     return false;  // package is read-only, can't update anything
   }
+
+  auto global_lock = global_critical_region_.Acquire();
+
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
   auto package_file = main_file();
 
@@ -765,6 +768,8 @@ void StfsContainerDevice::STFSDirectoryWrite() {
     // Read-only package.
     return;
   }
+
+  auto global_lock = global_critical_region_.Acquire();
 
   if (root_entry_ == nullptr) {
     // Something bad happened during load?
@@ -1029,6 +1034,9 @@ void StfsContainerDevice::STFSSetDataBlockChain(
   // TODO: this should handle blocks being removed from the current chain &
   // de-allocate them properly...
   // STFSResizeDataBlockChain can do that for most cases though
+
+  auto global_lock = global_critical_region_.Acquire();
+
   for (auto it = chain.rbegin(); it != chain.rend(); it++) {
     auto hash_entry = STFSGetDataHashEntry(*it);
     if (it == chain.rbegin()) {
@@ -1047,6 +1055,8 @@ std::vector<uint32_t> StfsContainerDevice::STFSResizeDataBlockChain(
   if (is_read_only()) {
     return block_chain;
   }
+
+  auto global_lock = global_critical_region_.Acquire();
 
   bool chain_updated = false;
   if (num_blocks > block_chain.size()) {
@@ -1310,6 +1320,7 @@ void StfsContainerDevice::STFSSetDataHashEntry(
   if (is_read_only()) {
     return;
   }
+  auto global_lock = global_critical_region_.Acquire();
 
   auto& table = STFSGetDataHashTable(block_num, nullptr);
 
@@ -1321,6 +1332,7 @@ void StfsContainerDevice::STFSSetDataHashEntry(
 }
 
 void StfsContainerDevice::STFSBlockMarkDirty(uint32_t block_num) {
+  auto global_lock = global_critical_region_.Acquire();
   if (!STFSBlockIsMarkedDirty(block_num)) {
     dirty_blocks_.push_back(block_num);
   }
@@ -1335,6 +1347,7 @@ void StfsContainerDevice::STFSBlockFree(uint32_t block_num) {
   if (is_read_only()) {
     return;  // can't modify read-only package!
   }
+  auto global_lock = global_critical_region_.Acquire();
 
   auto& hash_table = STFSGetDataHashTable(block_num, nullptr);
   auto entry_num = block_num % kBlocksPerHashLevel[0];
@@ -1356,6 +1369,7 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
   if (is_read_only()) {
     return -1;  // can't modify read-only package!
   }
+  auto global_lock = global_critical_region_.Acquire();
 
   uint32_t block_num = -1;
 
