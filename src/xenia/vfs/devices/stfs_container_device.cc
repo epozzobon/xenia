@@ -1340,11 +1340,16 @@ void StfsContainerDevice::STFSBlockFree(uint32_t block_num) {
   auto entry_num = block_num % kBlocksPerHashLevel[0];
   auto& entry = hash_table.entries[entry_num];
 
-  entry.set_level0_allocation_state(StfsHashState::kFree);
-  entry.set_level0_next_block(kEndOfChain);
-  STFSBlockMarkDirty(block_num);
+  auto prev_state = entry.level0_allocation_state();
 
-  header_.metadata.volume_descriptor.stfs.free_block_count++;
+  if (prev_state != StfsHashState::kFree &&
+      prev_state != StfsHashState::kFree2) {
+    entry.set_level0_allocation_state(StfsHashState::kFree);
+    entry.set_level0_next_block(kEndOfChain);
+    STFSBlockMarkDirty(block_num);
+
+    header_.metadata.volume_descriptor.stfs.free_block_count++;
+  }
 }
 
 uint32_t StfsContainerDevice::STFSBlockAllocate() {
@@ -1359,7 +1364,7 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
     // No unused blocks available, need to add new one ourselves
     block_num = descriptor.total_block_count++;
   } else {
-    // Apparently we have an unused block already allocated, hunt it down...
+    // Apparently we have a free block already allocated, hunt it down...
 
     uint32_t cur_block = 0;
     while (cur_block < descriptor.total_block_count) {

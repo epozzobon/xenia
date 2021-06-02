@@ -448,6 +448,15 @@ XEPACKEDSTRUCT(XContentHeader, {
   uint8_t content_id[0x14];
   be<uint32_t> header_size;
 
+  // TODO: add proper signature structs (XE_CONSOLE_CERTIFICATE etc)
+  uint32_t console_type() const {
+    return xe::load_and_swap<uint32_t>(&signature[0x18]);
+  }
+
+  void set_console_type(uint32_t value) {
+    xe::store_and_swap<uint32_t>(&signature[0x18], value);
+  }
+
   bool is_magic_valid() const {
     return magic == XContentPackageType::kCon ||
            magic == XContentPackageType::kLive ||
@@ -494,6 +503,9 @@ XEPACKEDSTRUCT(StfsHeader, {
 
   void set_defaults() {
     header.magic = XContentPackageType::kCon;
+
+    // Velocity needs a valid console-type set for it to load our packages
+    header.set_console_type(2); // retail
 
     // CON doesn't contain XContentMetadataExtra
     header.header_size = sizeof(StfsHeader) - sizeof(XContentMetadataExtra);
