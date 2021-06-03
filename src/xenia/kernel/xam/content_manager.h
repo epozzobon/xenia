@@ -66,7 +66,9 @@ struct XCONTENT_DATA {
   }
 
   std::string file_name() const {
-    return load_and_swap<std::string>(file_name_raw);
+    std::string value;
+    value.assign(file_name_raw, countof(file_name_raw));
+    return value;
   }
 
   void set_display_name(const std::u16string_view value) {
