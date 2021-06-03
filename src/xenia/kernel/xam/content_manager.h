@@ -51,7 +51,13 @@ struct XCONTENT_DATA {
     uint16_t uint[128];
     char16_t chars[128];
   } display_name_raw;
+
   char file_name_raw[42];
+
+  // Some games use this padding field as a null-terminator, as eg.
+  // DLC packages usually fill the entire file_name_raw array
+  // Not every game sets it to 0 though, so make sure any file_name_raw reads
+  // only go up to 42 chars!
   uint8_t padding[2];
 
   bool operator==(const XCONTENT_DATA& other) const {
@@ -67,7 +73,8 @@ struct XCONTENT_DATA {
 
   std::string file_name() const {
     std::string value;
-    value.assign(file_name_raw, countof(file_name_raw));
+    value.assign(file_name_raw,
+                 std::min(strlen(file_name_raw), countof(file_name_raw)));
     return value;
   }
 

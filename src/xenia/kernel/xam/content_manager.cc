@@ -131,7 +131,10 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
     auto device = std::make_unique<vfs::StfsContainerDevice>(
         fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_),
         file_path, true);
-    device->Initialize();
+    if (!device->Initialize()) {
+      // Error reading as STFS package
+      continue;
+    }
 
     XCONTENT_DATA content_data = {0};
     content_data.device_id = device_id;
