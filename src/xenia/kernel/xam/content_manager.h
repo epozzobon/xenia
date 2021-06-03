@@ -91,6 +91,9 @@ struct XCONTENT_DATA {
     std::fill_n(file_name_raw, countof(file_name_raw), 0);
     string_util::copy_maybe_truncating<string_util::Safety::IKnowWhatIAmDoing>(
         file_name_raw, value, xe::countof(file_name_raw));
+
+    // Some games rely on padding field acting as a null-terminator...
+    padding[0] = padding[1] = 0;
   }
 };
 static_assert_size(XCONTENT_DATA, 308);

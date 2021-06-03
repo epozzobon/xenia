@@ -136,7 +136,7 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
       continue;
     }
 
-    XCONTENT_DATA content_data = {0};
+    XCONTENT_DATA content_data;
     content_data.device_id = device_id;
     content_data.content_type = device->header().metadata.content_type;
     content_data.set_display_name(
