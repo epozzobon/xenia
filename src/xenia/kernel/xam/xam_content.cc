@@ -196,7 +196,7 @@ dword_result_t XamContentCreateEx(dword_t user_index, lpstring_t root_name,
   }
 
   if (license_mask_ptr && XSUCCEEDED(result)) {
-    *license_mask_ptr = 0;  // Stub!
+    *license_mask_ptr = static_cast<uint32_t>(cvars::license_mask);
   }
 
   if (overlapped_ptr) {

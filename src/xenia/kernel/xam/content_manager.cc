@@ -139,8 +139,12 @@ std::vector<XCONTENT_DATA> ContentManager::ListContent(
     XCONTENT_DATA content_data;
     content_data.device_id = device_id;
     content_data.content_type = device->header().metadata.content_type;
-    content_data.set_display_name(
-        device->header().metadata.display_name(XLanguage::kEnglish));
+
+    // Get display name in the titles default language, as some JP games seem to
+    // expect the japanese display_name value
+    content_data.set_display_name(device->header().metadata.display_name(
+        kernel_state_->title_language()));
+
     content_data.set_file_name(path_to_utf8(file_info.name));
 
     result.emplace_back(std::move(content_data));
