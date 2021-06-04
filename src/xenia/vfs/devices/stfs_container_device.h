@@ -112,6 +112,9 @@ class StfsContainerDevice : public Device {
   // Writes updated headers & hash-tables to the file
   bool STFSFlush();
 
+  // Resets hash tables to an empty state
+  bool STFSReset();
+
   std::vector<uint32_t> STFSGetDataBlockChain(uint32_t block_num,
                                               uint32_t max_count = 0xFFFFFF);
   void STFSSetDataBlockChain(const std::vector<uint32_t>& chain);

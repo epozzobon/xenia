@@ -76,6 +76,16 @@ XEPACKEDSTRUCT(StfsVolumeDescriptor, {
   bool is_valid() const {
     return descriptor_length == sizeof(StfsVolumeDescriptor);
   }
+
+  void set_defaults() {
+    descriptor_length = sizeof(StfsVolumeDescriptor);
+    version = 0;
+    flags.as_byte = 0;
+    file_table_block_count = 0;
+    set_file_table_block_number(0);
+    memset(top_hash_table_hash, 0, 0x14);
+    total_block_count = free_block_count = 0;
+  }
 });
 static_assert_size(StfsVolumeDescriptor, 0x24);
 
@@ -512,9 +522,7 @@ XEPACKEDSTRUCT(StfsHeader, {
 
     metadata.metadata_version = 2;
     metadata.volume_type = XContentVolumeType::kStfs;
-    metadata.volume_descriptor.stfs.descriptor_length =
-        sizeof(StfsVolumeDescriptor);
-    metadata.volume_descriptor.stfs.file_table_block_count = 0;
+    metadata.volume_descriptor.stfs.set_defaults();
   }
 });
 static_assert_size(StfsHeader, 0xAD0E);

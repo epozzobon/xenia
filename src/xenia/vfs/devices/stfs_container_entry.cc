@@ -115,6 +115,15 @@ bool StfsContainerEntry::DeleteEntryInternal(Entry* entry) {
     return false;
   }
 
+  // If this is root entry & the last file is being deleted:
+  if (path_.empty() && children_.size() == 1 && children_[0].get() == entry) {
+    // The last file is being deleted from the package root
+    // Ask STFS device to reset itself, this'll remove all hash-tables & unused
+    // blocks, etc.
+    auto device = reinterpret_cast<StfsContainerDevice*>(device_);
+    return device->STFSReset();
+  }
+
   // Free any blocks used by the entry
   auto xcontent_entry = reinterpret_cast<StfsContainerEntry*>(entry);
   xcontent_entry->set_length(0);

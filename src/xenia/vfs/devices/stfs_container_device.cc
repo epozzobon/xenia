@@ -753,6 +753,38 @@ bool StfsContainerDevice::STFSFlush() {
   return true;
 }
 
+bool StfsContainerDevice::STFSReset() {
+  if (is_read_only()) {
+    return false;  // package is read-only, can't update anything
+  }
+
+  auto global_lock = global_critical_region_.Acquire();
+
+  // Reset our cached hash table/block info
+  hash_tables_.clear();
+  dirty_blocks_.clear();
+  invalid_tables_.clear();
+
+  // Reset block totals & directory info
+  auto& descriptor = header_.metadata.volume_descriptor.stfs;
+  descriptor.set_defaults();
+
+  // Truncate file to end of header
+  auto package_file = main_file();
+  xe::filesystem::Seek(package_file, 0, SEEK_SET);
+
+  auto new_size = xe::round_up(header_.header.header_size, kBlockSize);
+  xe::filesystem::TruncateStdioFile(package_file, new_size);
+  files_total_size_ = new_size;
+
+  // Allocate directory at beginning of package
+  auto directory_block = STFSBlockAllocate();
+  descriptor.set_file_table_block_number(directory_block);
+  descriptor.file_table_block_count = 1;
+
+  return true;
+}
+
 // Recursively flattens the entry tree to a list of entries
 void FlattenChildEntries(StfsContainerEntry* entry,
                          std::vector<StfsContainerEntry*>* entry_list) {
