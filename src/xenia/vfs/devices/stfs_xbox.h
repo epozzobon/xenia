@@ -43,7 +43,8 @@ enum class XContentVolumeType : uint32_t {
 };
 
 /* STFS structures */
-XEPACKEDSTRUCT(StfsVolumeDescriptor, {
+#pragma pack(push, 1)
+struct StfsVolumeDescriptor {
   uint8_t descriptor_length;
   uint8_t version;
   union {
@@ -86,8 +87,9 @@ XEPACKEDSTRUCT(StfsVolumeDescriptor, {
     memset(top_hash_table_hash, 0, 0x14);
     total_block_count = free_block_count = 0;
   }
-});
+};
 static_assert_size(StfsVolumeDescriptor, 0x24);
+#pragma pack(pop)
 
 enum class StfsHashState : uint8_t {
   // TODO: find out difference between Free/Free2 & InUse/InUse2...
@@ -100,7 +102,7 @@ enum class StfsHashState : uint8_t {
 struct StfsHashEntry {
   uint8_t sha1[0x14];
 
-  xe::be<uint32_t> info_raw;
+  be<uint32_t> info_raw;
 
   uint32_t level0_next_block() const { return info_raw & 0xFFFFFF; }
   void set_level0_next_block(uint32_t value) {
@@ -142,7 +144,7 @@ static_assert_size(StfsHashEntry, 0x18);
 
 struct StfsHashTable {
   StfsHashEntry entries[170];
-  xe::be<uint32_t> num_blocks;  // num L0 blocks covered by this table?
+  be<uint32_t> num_blocks;  // num L0 blocks covered by this table?
   uint8_t padding[12];
 };
 static_assert_size(StfsHashTable, 0x1000);
@@ -254,7 +256,8 @@ struct XContentAttributes {
 };
 static_assert_size(XContentAttributes, 1);
 
-XEPACKEDSTRUCT(XContentMetadata, {
+#pragma pack(push, 1)
+struct XContentMetadata {
   static const uint32_t kThumbLengthV1 = 0x4000;
   static const uint32_t kThumbLengthV2 = 0x3D00;
 
@@ -441,8 +444,9 @@ XEPACKEDSTRUCT(XContentMetadata, {
     string_util::copy_and_swap_truncating(title_name_raw.chars, value,
                                           countof(title_name_raw.chars));
   }
-});
+};
 static_assert_size(XContentMetadata, 0x93D6);
+#pragma pack(pop)
 
 struct XContentLicense {
   be<uint64_t> licensee_id;
@@ -451,7 +455,8 @@ struct XContentLicense {
 };
 static_assert_size(XContentLicense, 0x10);
 
-XEPACKEDSTRUCT(XContentHeader, {
+#pragma pack(push, 1)
+struct XContentHeader {
   be<XContentPackageType> magic;
 
   union {
@@ -470,8 +475,9 @@ XEPACKEDSTRUCT(XContentHeader, {
            magic == XContentPackageType::kLive ||
            magic == XContentPackageType::kPirs;
   }
-});
+};
 static_assert_size(XContentHeader, 0x344);
+#pragma pack(pop)
 
 struct XContentMetadataTitleUpdate {
   be<uint32_t> unknown;
@@ -496,7 +502,8 @@ struct XContentMetadataExtra {
 };
 static_assert_size(XContentMetadataExtra, 0x15F4);
 
-XEPACKEDSTRUCT(StfsHeader, {
+#pragma pack(push, 1)
+struct StfsHeader {
   static const uint32_t kMetadataOffset = sizeof(XContentHeader);
   static const uint32_t kSizeBasic = 0x971A;
   static const uint32_t kSizeWithExtra =
@@ -523,8 +530,9 @@ XEPACKEDSTRUCT(StfsHeader, {
     metadata.volume_type = XContentVolumeType::kStfs;
     metadata.volume_descriptor.stfs.set_defaults();
   }
-});
+};
 static_assert_size(StfsHeader, 0xAD0E);
+#pragma pack(pop)
 
 }  // namespace vfs
 }  // namespace xe
