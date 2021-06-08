@@ -453,19 +453,17 @@ static_assert_size(XContentLicense, 0x10);
 
 XEPACKEDSTRUCT(XContentHeader, {
   be<XContentPackageType> magic;
-  uint8_t signature[0x228];
+
+  union {
+    // signature used by LIVE/PIRS content packages
+    uint8_t online[0x228];
+    // signature used by CON (console-signed) savegame/profile packages
+    X_XE_CONSOLE_SIGNATURE console;
+  } signature;
+
   XContentLicense licenses[0x10];
   uint8_t content_id[0x14];
   be<uint32_t> header_size;
-
-  // TODO: add proper signature structs (XE_CONSOLE_CERTIFICATE etc)
-  uint32_t console_type() const {
-    return xe::load_and_swap<uint32_t>(&signature[0x18]);
-  }
-
-  void set_console_type(uint32_t value) {
-    xe::store_and_swap<uint32_t>(&signature[0x18], value);
-  }
 
   bool is_magic_valid() const {
     return magic == XContentPackageType::kCon ||
@@ -499,7 +497,7 @@ struct XContentMetadataExtra {
 static_assert_size(XContentMetadataExtra, 0x15F4);
 
 XEPACKEDSTRUCT(StfsHeader, {
-  static const uint32_t kMetadataOffset = 0x344;
+  static const uint32_t kMetadataOffset = sizeof(XContentHeader);
   static const uint32_t kSizeBasic = 0x971A;
   static const uint32_t kSizeWithExtra =
       kSizeBasic + sizeof(XContentMetadataExtra);
@@ -515,7 +513,8 @@ XEPACKEDSTRUCT(StfsHeader, {
     header.magic = XContentPackageType::kCon;
 
     // Velocity needs a valid console-type set for it to load our packages
-    header.set_console_type(2); // retail
+    header.signature.console.console_certificate.console_type =
+        XConsoleType::Retail;
 
     // CON doesn't contain XContentMetadataExtra
     header.header_size = sizeof(StfsHeader) - sizeof(XContentMetadataExtra);
