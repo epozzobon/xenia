@@ -874,6 +874,12 @@ void StfsContainerDevice::STFSDirectoryWrite() {
       dir_entry.modified_date = modified_date;
       dir_entry.modified_time = modified_time;
 
+      if (entry->start_block_ == -1) {
+        // Entry has no block allocated for it yet, so let's allocate one for it
+        entry->start_block_ = STFSBlockAllocate();
+        entry->UpdateBlockList();
+      }
+
       if (entry->is_dirty_) {
         // Mark all blocks in the entries chain as dirty
         auto& chain = STFSGetDataBlockChain(entry->start_block_);
