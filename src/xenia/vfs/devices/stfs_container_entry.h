@@ -53,6 +53,8 @@ class StfsContainerEntry : public Entry {
   bool set_length(uint32_t new_length);
   bool is_read_only();
 
+  void mark_dirty() { is_dirty_ = true; }
+
  private:
   friend class StfsContainerDevice;
 
@@ -68,6 +70,10 @@ class StfsContainerEntry : public Entry {
   // Operations performed with start_block_ = -1 will allocate a new block for
   // us first
   uint32_t start_block_ = -1;
+
+  // If any writes have happened to the file, mark it dirty so we can rehash the
+  // blocks for it
+  bool is_dirty_ = false;
 
   std::vector<BlockRecord> block_list_;
 };

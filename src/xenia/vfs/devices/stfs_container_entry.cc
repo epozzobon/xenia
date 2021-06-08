@@ -20,7 +20,10 @@ namespace vfs {
 StfsContainerEntry::StfsContainerEntry(Device* device, Entry* parent,
                                        const std::string_view path,
                                        MultiFileHandles* files)
-    : Entry(device, parent, path), files_(files), start_block_(-1) {}
+    : Entry(device, parent, path),
+      files_(files),
+      start_block_(-1),
+      is_dirty_(false) {}
 
 StfsContainerEntry::~StfsContainerEntry() = default;
 

@@ -874,6 +874,17 @@ void StfsContainerDevice::STFSDirectoryWrite() {
       dir_entry.modified_date = modified_date;
       dir_entry.modified_time = modified_time;
 
+      if (entry->is_dirty_) {
+        // Mark all blocks in the entries chain as dirty
+        auto& chain = STFSGetDataBlockChain(entry->start_block_);
+
+        for (auto& block : chain) {
+          STFSBlockMarkDirty(block);
+        }
+
+        entry->is_dirty_ = false;
+      }
+
       dir_entry.set_start_block_number(entry->start_block_);
       dir_entry.set_allocated_data_blocks(uint32_t(entry->block_list_.size()));
       dir_entry.set_valid_data_blocks(dir_entry.allocated_data_blocks());

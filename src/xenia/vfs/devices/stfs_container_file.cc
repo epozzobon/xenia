@@ -114,6 +114,11 @@ X_STATUS StfsContainerFile::WriteSync(const void* buffer, size_t buffer_length,
     }
   }
 
+  // Mark entry as dirty so its hash chain will be rehashed
+  // (seems like the most efficient way, instead of needing STFSBlockMarkDirty
+  // to check STFSBlockIsMarkedDirty on every block written...)
+  entry_->mark_dirty();
+
   return X_STATUS_SUCCESS;
 }
 
