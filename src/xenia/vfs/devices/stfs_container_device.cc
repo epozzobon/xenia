@@ -1032,6 +1032,32 @@ bool StfsContainerDevice::STFSDirectoryRead() {
 
       entry->start_block_ = dir_entry.start_block_number();
 
+      // Check that block numbers aren't obviously invalid
+      if (entry->start_block_ >= descriptor.total_block_count) {
+        XELOGW(
+            "STFSDirectoryRead: entry '{}' uses out-of-range start block "
+            "0x{:X} (package block count: 0x{:X}",
+            name, entry->start_block_, descriptor.total_block_count);
+        assert_always();
+      }
+
+      if (dir_entry.allocated_data_blocks() >= descriptor.total_block_count) {
+        XELOGW(
+            "STFSDirectoryRead: entry '{}' has 0x{:X} allocated_data_blocks "
+            "(package block count: 0x{:X}",
+            name, dir_entry.allocated_data_blocks(),
+            descriptor.total_block_count);
+        assert_always();
+      }
+
+      if (dir_entry.valid_data_blocks() >= descriptor.total_block_count) {
+        XELOGW(
+            "STFSDirectoryRead: entry '{}' has 0x{:X} valid_data_blocks "
+            "(package block count: 0x{:X}",
+            name, dir_entry.valid_data_blocks(), descriptor.total_block_count);
+        assert_always();
+      }
+
       all_entries.push_back(entry.get());
 
       // Preload block list for this entry
@@ -1064,8 +1090,21 @@ std::vector<uint32_t> StfsContainerDevice::STFSGetDataBlockChain(
     max_count++;
   }
 
+  auto total_blocks = header_.metadata.volume_descriptor.stfs.total_block_count;
+
   uint32_t cur_block = block_num;
   for (uint32_t cur_idx = 0; cur_idx < max_count; cur_idx++) {
+    // Check that package actually contains each block in the chain
+    // TODO: maybe we should error/break out if this happens?
+    if (cur_block >= total_blocks) {
+      XELOGW(
+          "STFSGetDataBlockChain: out-of-range block 0x{:X} part of block "
+          "0x{:X} chain "
+          "(package block count: 0x{:X}, chain idx {})",
+          cur_block, block_num, total_blocks, cur_idx);
+      assert_always();
+    }
+
     block_chain.push_back(cur_block);
     auto hash_entry = STFSGetDataHashEntry(cur_block);
 
