@@ -158,20 +158,28 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
             bool skip_package = true;
             if (exec_info) {
               // Check STFS execution info against our execution info
-              skip_package =
-                  memcmp(&stfs_header->metadata.execution_info, exec_info,
-                         sizeof(xex2_opt_execution_info)) != 0;
+              // (only check media-id & title-id, as some execution info fields
+              // can differ between update pkg and XEX)
+              skip_package = stfs_header->metadata.execution_info.media_id !=
+                                 exec_info->media_id ||
+                             stfs_header->metadata.execution_info.title_id !=
+                                 exec_info->title_id;
             }
 
             if (skip_package && exec_module_info) {
-              // If an executable module is loaded we'll check against that too
-              skip_package = memcmp(&stfs_header->metadata.execution_info,
-                                    exec_module_info,
-                                    sizeof(xex2_opt_execution_info)) != 0;
+              // Check STFS execution info against our execution info
+              // (only check media-id & title-id, as some execution info fields
+              // can differ between update pkg and XEX)
+              skip_package = stfs_header->metadata.execution_info.media_id !=
+                                 exec_module_info->media_id ||
+                             stfs_header->metadata.execution_info.title_id !=
+                                 exec_module_info->title_id;
             }
 
             if (skip_package) {
               // Execution info doesn't match, skip this package
+              XELOGD("Update package {} execution info doesn't match game!",
+                     update.file_name());
               content_manager->CloseContent(kUpdatePartition);
               continue;
             }
