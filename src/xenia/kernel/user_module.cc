@@ -112,154 +112,10 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
   }
 
   auto module_path = fs_entry->path();
-  auto content_manager = kernel_state()->content_manager();
-
-  std::string unused;
-  if (!fs->FindSymbolicLink(kUpdatePartition + ":", unused)) {
-    // No update package currently loaded, check if we have any that are
-    // applicable
-
-    // Executable module likely hasn't been setup yet (depends if this is the
-    // first module loaded or not), so we'll probably need to grab title ID from
-    // execution info header & set content_manager override
-
-    xex2_opt_execution_info* exec_info = nullptr;
-    xex_module()->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
-
-    xex2_opt_execution_info* exec_module_info = 0;
-    auto exe_module = kernel_state()->GetExecutableModule();
-    if (exe_module) {
-      exe_module->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_module_info);
-    }
-
-    if (exec_info || exec_module_info) {
-      // Only set override if we don't have an executable module yet/exe
-      // module doesn't have execution info
-      if (exec_info && !exec_module_info) {
-        content_manager->SetTitleIdOverride(exec_info->title_id);
-      }
-
-      auto update_packages =
-          content_manager->ListContent(0, XContentType::kInstaller);
-
-      auto stfs_header = std::make_unique<vfs::StfsHeader>();
-
-      for (auto& update : update_packages) {
-        XELOGD("Checking TU {} eligibility...", update.file_name());
-        auto result = content_manager->OpenContent(kUpdatePartition, update);
-
-        if (result != X_ERROR_SUCCESS) {
-          XELOGD("Failed to open TU package for reading!");
-          continue;
-        }
-
-        if (exec_info || exec_module_info) {
-          result = content_manager->GetContentHeader(kUpdatePartition,
-                                                     stfs_header.get());
-          if (result == X_ERROR_SUCCESS) {
-            bool skip_package = true;
-            if (exec_info) {
-              // Check STFS execution info against our execution info
-              // (only check media-id & title-id, as some execution info fields
-              // can differ between update pkg and XEX)
-              skip_package = stfs_header->metadata.execution_info.media_id !=
-                                 exec_info->media_id ||
-                             stfs_header->metadata.execution_info.title_id !=
-                                 exec_info->title_id;
-              if (skip_package) {
-                XELOGD(
-                    "TU doesn't match exec_info, skipping TU (TU: "
-                    "{:08X}-{:08X}, EX: {:08X}-{:08X})",
-                    uint32_t(stfs_header->metadata.execution_info.title_id),
-                    uint32_t(stfs_header->metadata.execution_info.media_id),
-                    uint32_t(exec_info->title_id),
-                    uint32_t(exec_info->media_id));
-              }
-            }
-
-            if (skip_package && exec_module_info) {
-              // Check STFS execution info against our execution info
-              // (only check media-id & title-id, as some execution info fields
-              // can differ between update pkg and XEX)
-              skip_package = stfs_header->metadata.execution_info.media_id !=
-                                 exec_module_info->media_id ||
-                             stfs_header->metadata.execution_info.title_id !=
-                                 exec_module_info->title_id;
-              if (skip_package) {
-                XELOGD(
-                    "TU doesn't match exec_module_info, skipping TU (TU: "
-                    "{:08X}-{:08X}, EX: {:08X}-{:08X})",
-                    uint32_t(stfs_header->metadata.execution_info.title_id),
-                    uint32_t(stfs_header->metadata.execution_info.media_id),
-                    uint32_t(exec_module_info->title_id),
-                    uint32_t(exec_module_info->media_id));
-              }
-            }
-
-            if (skip_package) {
-              // Execution info doesn't match, skip this package
-              XELOGD("Update package {} execution info doesn't match game!",
-                     update.file_name());
-              content_manager->CloseContent(kUpdatePartition);
-              continue;
-            }
-          }
-        }
-
-        if (!fs->ResolvePath(kUpdatePartition + ":\\" + module_path + "p")) {
-          // Check if patch exists under discXXX folder
-          uint8_t disc_num = 0;
-          if (exec_info) {
-            disc_num = exec_info->disc_number;
-          }
-
-          // If we have one, get disc num from the executable module instead of
-          // this module (is likely more accurate than this module, eg. we might
-          // be a DLL that has no exec_info)
-          if (exec_module_info) {
-            disc_num = exec_module_info->disc_number;
-          }
-
-          auto disc_specific_path = fmt::format("disc{:03}\\", disc_num);
-          XELOGD("Failed to locate patch file, testing '{}' path",
-                 disc_specific_path);
-          if (fs->ResolvePath(kUpdatePartition + ":\\" + disc_specific_path +
-                              module_path + "p")) {
-            // XEXP exists inside disc0XX folder!
-            // Remap the update:\ partition to point to that folder
-
-            // TODO: verify the XEXP before we do this remapping...
-
-            auto fs = kernel_state()->file_system();
-            std::string sym_target;
-            if (fs->FindSymbolicLink(kUpdatePartition + ":", sym_target)) {
-              // TODO: an UpdateSymbolicLink fn might be nice
-              fs->UnregisterSymbolicLink(kUpdatePartition + ":");
-              fs->RegisterSymbolicLink(kUpdatePartition + ":",
-                                       sym_target + disc_specific_path);
-              XELOGD("TU package seems eligible!");
-              break;
-            }
-          }
-
-          XELOGD("Failed to locate {}p inside TU package", module_path);
-
-          // XEXP/DLLP doesn't exist in this package, skip this package
-          content_manager->CloseContent(kUpdatePartition);
-
-          continue;
-        } else {
-          // XEXP/DLLP found, break out of package loop
-          // TODO: verify XEXP/DLLP works first?
-          XELOGD("TU package seems eligible!");
-          break;
-        }
-      }
-    }
-  }
+  TryMountUpdatePackage(module_path);
 
   // Unset any content_manager title ID overrides
-  content_manager->SetTitleIdOverride(0);
+  kernel_state()->content_manager()->SetTitleIdOverride(0);
 
   // Search for xexp patch file, first check if it exists at update:\ root
   auto patch_entry =
@@ -291,6 +147,147 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
   }
 
   return LoadXexContinue();
+}
+
+bool UserModule::TryMountUpdatePackage(const std::string& module_path) {
+  auto fs = kernel_state()->file_system();
+  auto content_manager = kernel_state()->content_manager();
+
+  std::string unused;
+  if (fs->FindSymbolicLink(kUpdatePartition + ":", unused)) {
+    return false;  // Already have an update package mounted
+  }
+
+  // No update package currently loaded, check if we have any that are
+  // applicable
+
+  // Executable module likely hasn't been setup yet (depends if this is the
+  // first module loaded or not), so we'll probably need to grab title ID from
+  // execution info header & set content_manager override
+
+  xex2_opt_execution_info* exec_info = nullptr;
+  xex_module()->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
+
+  xex2_opt_execution_info* exec_module_info = nullptr;
+  auto exe_module = kernel_state()->GetExecutableModule();
+  if (exe_module) {
+    exe_module->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_module_info);
+  }
+
+  if (exec_info && !exec_module_info) {
+    // Only set override if we don't have an executable module yet/exe
+    // module doesn't have execution info
+    content_manager->SetTitleIdOverride(exec_info->title_id);
+  }
+
+  auto update_packages =
+      content_manager->ListContent(0, XContentType::kInstaller);
+
+  auto stfs_header = std::make_unique<vfs::StfsHeader>();
+
+  for (auto& update : update_packages) {
+    XELOGD("Checking if TU {} is applicable...", update.file_name());
+    auto result = content_manager->OpenContent(kUpdatePartition, update);
+
+    if (result != X_ERROR_SUCCESS) {
+      XELOGD("Failed to open TU package for reading!");
+      continue;
+    }
+
+    // First try checking if patch exists under discXXX folder
+    uint8_t disc_num = 0;
+    if (exec_info) {
+      disc_num = exec_info->disc_number;
+    }
+
+    // If we have one, get disc num from the loaded executable module
+    // instead of this module
+    // (is likely more accurate than this module, eg. we might be a DLL that
+    // has no exec_info)
+    if (exec_module_info) {
+      disc_num = exec_module_info->disc_number;
+    }
+
+    auto xexp_root = fmt::format("disc{:03}\\", disc_num);
+    auto xexp_path = kUpdatePartition + ":\\" + xexp_root + module_path + "p";
+    bool remap_symlink = true;  // set symlink to xexp_root
+
+    vfs::Entry* xexp_entry = fs->ResolvePath(xexp_path);
+    if (!xexp_entry) {
+      // Not inside disc000 folder, try root of package
+      xexp_root = "";
+      xexp_path = kUpdatePartition + ":\\" + module_path + "p";
+      remap_symlink = false;
+
+      xexp_entry = fs->ResolvePath(xexp_path);
+      if (!xexp_entry) {
+        // XEXP/DLLP doesn't exist in this package, skip this package
+
+        XELOGD("Failed to locate {}p inside TU package", module_path);
+        content_manager->CloseContent(kUpdatePartition);
+        continue;
+      }
+    }
+
+    // XEXP located - check contents
+    auto xexp_module = std::make_unique<cpu::XexModule>(
+        kernel_state()->processor(), kernel_state());
+
+    // Read XEXP contents into memory
+    std::vector<uint8_t> xexp_data(xexp_entry->size());
+
+    // Open file for reading.
+    vfs::File* xexp_file = nullptr;
+    result = xexp_entry->Open(vfs::FileAccess::kGenericRead, &xexp_file);
+    if (XFAILED(result)) {
+      XELOGD("Failed to open {}p inside TU package", module_path);
+      content_manager->CloseContent(kUpdatePartition);
+      return result;
+    }
+
+    // Read entire file into memory.
+    size_t bytes_read = 0;
+    result =
+        xexp_file->ReadSync(xexp_data.data(), xexp_data.size(), 0, &bytes_read);
+    if (XFAILED(result)) {
+      XELOGD("Failed to read {}p inside TU package", module_path);
+      content_manager->CloseContent(kUpdatePartition);
+      return result;
+    }
+
+    // Close the file.
+    xexp_file->Destroy();
+
+    // Load XEXP module using xex_length = 0 as we only want headers
+    if (!xexp_module->Load(module_path + "p", xexp_root, xexp_data.data(), 0)) {
+      XELOGD("Failed to load {}p module", module_path);
+      content_manager->CloseContent(kUpdatePartition);
+      continue;
+    }
+
+    if (!xexp_module->IsPatchApplicable(xex_module())) {
+      XELOGD("TU {}p isn't applicable to the loaded XEX");
+      content_manager->CloseContent(kUpdatePartition);
+      continue;
+    }
+
+    // If XEXP is inside a discXXX folder we need to remap update:\ to there
+    if (remap_symlink) {
+      auto fs = kernel_state()->file_system();
+      std::string sym_target;
+      if (fs->FindSymbolicLink(kUpdatePartition + ":", sym_target)) {
+        // TODO: an UpdateSymbolicLink fn might be nice
+        fs->UnregisterSymbolicLink(kUpdatePartition + ":");
+        fs->RegisterSymbolicLink(kUpdatePartition + ":",
+                                 sym_target + xexp_root);
+      }
+    }
+
+    XELOGD("TU package seems applicable!");
+    return true;
+  }
+
+  return false;
 }
 
 X_STATUS UserModule::LoadFromMemory(const void* addr, const size_t length) {

@@ -197,10 +197,10 @@ uint32_t XexModule::GetProcAddress(const std::string_view name) const {
   return 0;
 }
 
-int XexModule::ApplyPatch(XexModule* module) {
+bool XexModule::IsPatchApplicable(XexModule* module) {
   if (!is_patch()) {
     // This isn't a XEX2 patch.
-    return 1;
+    return false;
   }
 
   // Grab the delta descriptor and get to work.
@@ -219,7 +219,22 @@ int XexModule::ApplyPatch(XexModule* module) {
     XELOGW(
         "XEX patch signature hash doesn't match base XEX signature hash, patch "
         "will likely fail!");
+    return false;
   }
+
+  return true;
+}
+
+int XexModule::ApplyPatch(XexModule* module) {
+  if (!IsPatchApplicable(module)) {
+    return 1;
+  }
+
+  // Grab the delta descriptor and get to work.
+  xex2_opt_delta_patch_descriptor* patch_header = nullptr;
+  GetOptHeader(XEX_HEADER_DELTA_PATCH_DESCRIPTOR,
+               reinterpret_cast<void**>(&patch_header));
+  assert_not_null(patch_header);
 
   uint32_t size = module->xex_header()->header_size;
   if (patch_header->delta_headers_source_offset > size) {
@@ -402,6 +417,9 @@ int XexModule::ApplyPatch(XexModule* module) {
   }
 
   // Now loop through each block and apply the delta patches inside
+  uint8_t digest[0x14];
+  sha1::SHA1 s;
+
   while (cur_block->block_size) {
     const auto* next_block = (const xex2_compressed_block_info*)p;
 
@@ -919,8 +937,6 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
   // Read/convert XEX1/XEX2 security info to a common format
   ReadSecurityInfo();
 
-  auto sec_header = xex_security_info();
-
   // Try setting our base_address based on XEX_HEADER_IMAGE_BASE_ADDRESS, fall
   // back to xex_security_info otherwise
   base_address_ = xex_security_info()->load_address;
@@ -932,7 +948,11 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
   name_ = name;
   path_ = path;
 
-  uint8_t* data = memory()->TranslateVirtual(base_address_);
+  if (!xex_length) {
+    // No more loading can be performed if xex_length is empty
+    // (return true though as we can still read headers)
+    return true;
+  }
 
   // Load in the XEX basefile
   // We'll try using both XEX2 keys to see if any give a valid PE
