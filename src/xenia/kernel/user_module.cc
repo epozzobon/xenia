@@ -145,9 +145,11 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
       auto stfs_header = std::make_unique<vfs::StfsHeader>();
 
       for (auto& update : update_packages) {
+        XELOGD("Checking TU {} eligibility...", update.file_name());
         auto result = content_manager->OpenContent(kUpdatePartition, update);
 
         if (result != X_ERROR_SUCCESS) {
+          XELOGD("Failed to open TU package for reading!");
           continue;
         }
 
@@ -164,6 +166,15 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
                                  exec_info->media_id ||
                              stfs_header->metadata.execution_info.title_id !=
                                  exec_info->title_id;
+              if (skip_package) {
+                XELOGD(
+                    "TU doesn't match exec_info, skipping TU (TU: "
+                    "{:08X}-{:08X}, EX: {:08X}-{:08X})",
+                    uint32_t(stfs_header->metadata.execution_info.title_id),
+                    uint32_t(stfs_header->metadata.execution_info.media_id),
+                    uint32_t(exec_info->title_id),
+                    uint32_t(exec_info->media_id));
+              }
             }
 
             if (skip_package && exec_module_info) {
@@ -174,6 +185,15 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
                                  exec_module_info->media_id ||
                              stfs_header->metadata.execution_info.title_id !=
                                  exec_module_info->title_id;
+              if (skip_package) {
+                XELOGD(
+                    "TU doesn't match exec_module_info, skipping TU (TU: "
+                    "{:08X}-{:08X}, EX: {:08X}-{:08X})",
+                    uint32_t(stfs_header->metadata.execution_info.title_id),
+                    uint32_t(stfs_header->metadata.execution_info.media_id),
+                    uint32_t(exec_module_info->title_id),
+                    uint32_t(exec_module_info->media_id));
+              }
             }
 
             if (skip_package) {
@@ -201,6 +221,8 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
           }
 
           auto disc_specific_path = fmt::format("disc{:03}\\", disc_num);
+          XELOGD("Failed to locate patch file, testing '{}' path",
+                 disc_specific_path);
           if (fs->ResolvePath(kUpdatePartition + ":\\" + disc_specific_path +
                               module_path + "p")) {
             // XEXP exists inside disc0XX folder!
@@ -215,16 +237,21 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
               fs->UnregisterSymbolicLink(kUpdatePartition + ":");
               fs->RegisterSymbolicLink(kUpdatePartition + ":",
                                        sym_target + disc_specific_path);
+              XELOGD("TU package seems eligible!");
               break;
             }
           }
 
+          XELOGD("Failed to locate {}p inside TU package", module_path);
+
           // XEXP/DLLP doesn't exist in this package, skip this package
           content_manager->CloseContent(kUpdatePartition);
+
           continue;
         } else {
           // XEXP/DLLP found, break out of package loop
           // TODO: verify XEXP/DLLP works first?
+          XELOGD("TU package seems eligible!");
           break;
         }
       }
