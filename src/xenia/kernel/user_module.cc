@@ -187,6 +187,38 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
         }
 
         if (!fs->ResolvePath(kUpdatePartition + ":\\" + module_path + "p")) {
+          // Check if patch exists under discXXX folder
+          uint8_t disc_num = 0;
+          if (exec_info) {
+            disc_num = exec_info->disc_number;
+          }
+
+          // If we have one, get disc num from the executable module instead of
+          // this module (is likely more accurate than this module, eg. we might
+          // be a DLL that has no exec_info)
+          if (exec_module_info) {
+            disc_num = exec_module_info->disc_number;
+          }
+
+          auto disc_specific_path = fmt::format("disc{:03}\\", disc_num);
+          if (fs->ResolvePath(kUpdatePartition + ":\\" + disc_specific_path +
+                              module_path + "p")) {
+            // XEXP exists inside disc0XX folder!
+            // Remap the update:\ partition to point to that folder
+
+            // TODO: verify the XEXP before we do this remapping...
+
+            auto fs = kernel_state()->file_system();
+            std::string sym_target;
+            if (fs->FindSymbolicLink(kUpdatePartition + ":", sym_target)) {
+              // TODO: an UpdateSymbolicLink fn might be nice
+              fs->UnregisterSymbolicLink(kUpdatePartition + ":");
+              fs->RegisterSymbolicLink(kUpdatePartition + ":",
+                                       sym_target + disc_specific_path);
+              break;
+            }
+          }
+
           // XEXP/DLLP doesn't exist in this package, skip this package
           content_manager->CloseContent(kUpdatePartition);
           continue;
