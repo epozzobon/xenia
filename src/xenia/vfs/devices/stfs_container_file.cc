@@ -13,6 +13,7 @@
 #include <cmath>
 
 #include "xenia/base/math.h"
+#include "xenia/vfs/devices/stfs_container_device.h"
 #include "xenia/vfs/devices/stfs_container_entry.h"
 
 namespace xe {
@@ -24,7 +25,12 @@ StfsContainerFile::StfsContainerFile(uint32_t file_access,
 
 StfsContainerFile::~StfsContainerFile() = default;
 
-void StfsContainerFile::Destroy() { delete this; }
+void StfsContainerFile::Destroy() {
+  // Flush the STFS device whenever a file is closed:
+  auto device = reinterpret_cast<StfsContainerDevice*>(entry_->device());
+  device->STFSFlush();
+  delete this;
+}
 
 X_STATUS StfsContainerFile::ReadSync(void* buffer, size_t buffer_length,
                                      size_t byte_offset,

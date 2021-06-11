@@ -101,6 +101,9 @@ class StfsContainerDevice : public Device {
 
   StfsHeader& header() { return header_; }
 
+  // Writes updated headers & hash-tables to the file
+  bool STFSFlush();
+
  protected:
   friend class StfsContainerEntry;
   void STFSBlockMarkDirty(uint32_t block_num);
@@ -108,9 +111,6 @@ class StfsContainerDevice : public Device {
 
   uint32_t STFSBlockAllocate();
   void STFSBlockFree(uint32_t block_num);
-
-  // Writes updated headers & hash-tables to the file
-  bool STFSFlush();
 
   // Resets hash tables to an empty state
   bool STFSReset();
