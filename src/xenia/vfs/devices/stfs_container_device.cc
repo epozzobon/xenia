@@ -622,11 +622,16 @@ bool StfsContainerDevice::STFSFlush() {
   // Write out directory entries
   STFSDirectoryWrite();
 
+  // Update content_size (seems to just be size of all allocated blocks?)
+  header_.metadata.content_size =
+      uint64_t(descriptor.total_block_count - descriptor.free_block_count) *
+      kBlockSize;
+
   // Sanity check
   if (descriptor.total_block_count > kBlocksPerHashLevel[2]) {
     XELOGE(
-        "XContentDevice::Flush: too many blocks in package! {} blocks, STFS "
-        "allows maximum of {}!",
+        "STFS: Too many blocks in package ({} blocks), STFS allows maximum of "
+        "{}!",
         descriptor.total_block_count, kBlocksPerHashLevel[2]);
   }
 
@@ -835,8 +840,6 @@ void StfsContainerDevice::STFSDirectoryWrite() {
   }
 
   descriptor.file_table_block_count = uint16_t(num_blocks);
-  header_.metadata.content_size = 0;
-
   auto directory_chain = STFSResizeDataBlockChain(directory_block, num_blocks);
 
   for (uint32_t block_idx = 0; block_idx < num_blocks; block_idx++) {
@@ -862,7 +865,6 @@ void StfsContainerDevice::STFSDirectoryWrite() {
           (entry->attributes_ & kFileAttributeDirectory);
 
       dir_entry.length = uint32_t(entry->size_);
-      header_.metadata.content_size += dir_entry.length;
 
       auto [create_date, create_time] =
           encode_fat_timestamp(entry->create_timestamp_);
@@ -905,8 +907,8 @@ void StfsContainerDevice::STFSDirectoryWrite() {
         }
         if (parent == -1) {
           XELOGE(
-              "XContent: failed to locate parent entry in all_entries list, "
-              "this shouldn't happen!");
+              "STFS: failed to locate parent entry in all_entries list, this "
+              "shouldn't happen!");
           assert_always();
           parent = 0xFFFF;
         }
@@ -962,7 +964,7 @@ bool StfsContainerDevice::STFSDirectoryRead() {
       STFSDirectoryWrite();
       return true;
     }
-    XELOGFS("XContent: file_table_block_count = 0, skipping ReadDirectory");
+    XELOGFS("STFS: file_table_block_count = 0, skipping ReadDirectory");
     return true;  // no files to read!
   }
 
@@ -972,10 +974,8 @@ bool StfsContainerDevice::STFSDirectoryRead() {
                                 5);  // plus 5 in case descriptor is incorrect
 
   if (table_chain.size() != descriptor.file_table_block_count) {
-    XELOGW(
-        "XContent: found {} STFS file table blocks, but STFS headers expected "
-        "{}!",
-        table_chain.size(), descriptor.file_table_block_count);
+    XELOGW("STFS: found {} file table blocks, but headers expected {}!",
+           table_chain.size(), descriptor.file_table_block_count);
   }
 
   auto file = main_file();
@@ -1035,16 +1035,16 @@ bool StfsContainerDevice::STFSDirectoryRead() {
       // Check that block numbers aren't obviously invalid
       if (entry->start_block_ >= descriptor.total_block_count) {
         XELOGW(
-            "STFSDirectoryRead: entry '{}' uses out-of-range start block "
-            "0x{:X} (package block count: 0x{:X}",
+            "STFS: entry '{}' uses out-of-range start block 0x{:X} (package "
+            "block count: 0x{:X}",
             name, entry->start_block_, descriptor.total_block_count);
         assert_always();
       }
 
       if (dir_entry.allocated_data_blocks() >= descriptor.total_block_count) {
         XELOGW(
-            "STFSDirectoryRead: entry '{}' has 0x{:X} allocated_data_blocks "
-            "(package block count: 0x{:X}",
+            "STFS: entry '{}' has 0x{:X} allocated_data_blocks (package block "
+            "count: 0x{:X}",
             name, dir_entry.allocated_data_blocks(),
             descriptor.total_block_count);
         assert_always();
@@ -1052,8 +1052,8 @@ bool StfsContainerDevice::STFSDirectoryRead() {
 
       if (dir_entry.valid_data_blocks() >= descriptor.total_block_count) {
         XELOGW(
-            "STFSDirectoryRead: entry '{}' has 0x{:X} valid_data_blocks "
-            "(package block count: 0x{:X}",
+            "STFS: entry '{}' has 0x{:X} valid_data_blocks (package block "
+            "count: 0x{:X}",
             name, dir_entry.valid_data_blocks(), descriptor.total_block_count);
         assert_always();
       }
@@ -1068,8 +1068,8 @@ bool StfsContainerDevice::STFSDirectoryRead() {
         // the block count read from the file entry
         if (entry->block_list_.size() != dir_entry.allocated_data_blocks()) {
           XELOGW(
-              "XContent: failed to read correct block-chain for entry {}, "
-              "read {} blocks, expected {}",
+              "STFS: failed to read correct block-chain for entry {}, read {} "
+              "blocks, expected {}",
               entry->name_, entry->block_list_.size(),
               dir_entry.allocated_data_blocks());
           assert_always();
@@ -1078,7 +1078,7 @@ bool StfsContainerDevice::STFSDirectoryRead() {
       parent_entry->children_.emplace_back(std::move(entry));
     }
   }
-  XELOGFS("XContent: read {} files from package", all_entries.size());
+  XELOGFS("STFS: read {} files from package", all_entries.size());
 
   return true;
 }
