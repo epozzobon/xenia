@@ -8,6 +8,7 @@
  */
 
 #include "xenia/vfs/devices/stfs_container_entry.h"
+#include "xenia/base/clock.h"
 #include "xenia/base/math.h"
 #include "xenia/vfs/devices/stfs_container_device.h"
 #include "xenia/vfs/devices/stfs_container_file.h"
@@ -33,6 +34,9 @@ std::unique_ptr<StfsContainerEntry> StfsContainerEntry::Create(
   auto path = xe::utf8::join_guest_paths(parent->path(), name);
   auto entry =
       std::make_unique<StfsContainerEntry>(device, parent, path, files);
+
+  entry->create_timestamp_ = entry->write_timestamp_ =
+      Clock::QueryHostSystemTime();
 
   return std::move(entry);
 }

@@ -60,22 +60,21 @@ uint64_t decode_fat_timestamp(uint32_t date, uint32_t time) {
   return (timet + 11644473600LL) * 10000000;
 }
 
-// TODO: check if this works!
 std::tuple<uint32_t, uint32_t> encode_fat_timestamp(uint64_t timestamp) {
   time_t time_ = (timestamp / 10000000) - 11644473600LL;
   // Workaround for unset timestamps
   if (!timestamp) {
     time_ = 0;
   }
-  auto* tm = gmtime(&time_);
+  auto* tm = localtime(&time_);
 
-  uint32_t date = (tm->tm_year << 9) & 0xFE00;
-  date |= (tm->tm_mon << 5) & 0x1E0;
-  date |= (tm->tm_mday << 0) & 0x1F;
+  uint32_t date = ((tm->tm_year - 80) << 9);
+  date |= ((tm->tm_mon + 1) << 5);
+  date |= (tm->tm_mday << 0);
 
-  uint32_t time = (tm->tm_hour << 11) & 0xF800;
-  time |= (tm->tm_min << 5) & 0x7E0;
-  time |= (tm->tm_sec >> 1) & 0x1F;
+  uint32_t time = (tm->tm_hour << 11);
+  time |= (tm->tm_min << 5);
+  time |= (tm->tm_sec >> 1);
 
   return std::make_tuple(date, time);
 }
@@ -940,9 +939,23 @@ void StfsContainerDevice::STFSDirectoryWrite() {
         entry->UpdateBlockList();
       }
 
+      // Check if blocks are contiguous (all follow each other)
+      auto& chain = STFSGetDataBlockChain(entry->start_block_);
+
+      bool contiguous = true;
+      uint32_t next_block = entry->start_block_;
+      for (auto& block : chain) {
+        if (next_block != block) {
+          contiguous = false;
+          break;
+        }
+        next_block = block + 1;
+      }
+
+      dir_entry.flags.contiguous = contiguous;
+
       if (entry->is_dirty_) {
         // Mark all blocks in the entries chain as dirty
-        auto& chain = STFSGetDataBlockChain(entry->start_block_);
 
         for (auto& block : chain) {
           STFSBlockMarkDirty(block);
