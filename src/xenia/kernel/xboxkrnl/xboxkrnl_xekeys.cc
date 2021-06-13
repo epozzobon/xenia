@@ -110,7 +110,7 @@ std::map<XeKey, std::tuple<uint32_t, uint32_t>> kXeKeyProperties = {
     {XeKey::CARDEA_PRIVATE_KEY, {0x7E8, 0x1D0}},
     {XeKey::CONSOLE_CERTIFICATE, {0x9B8, 0x1A8}},
     {XeKey::XEIKA_CERTIFICATE, {0xB60, 0x1288}},
-    {XeKey::SPECIAL_KEY_VAULT_SIGNATURE, {0x1DF8, 0x100}},
+    {XeKey::SPECIAL_KEY_VAULT_SIGNATURE, {0x1DE8, 0x100}},
     {XeKey::CARDEA_CERTIFICATE, {0x1EE8, 0x2108}},
 };
 
