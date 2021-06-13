@@ -683,6 +683,7 @@ bool StfsContainerDevice::STFSFlush() {
       kBlockSize;
 
   // Update misc metadata
+
   kernel::xboxkrnl::XeKeysGetConsoleID(header_.metadata.console_id, nullptr);
 
   header_.metadata.profile_id = kernel::kernel_state()->user_profile()->xuid();
@@ -695,6 +696,20 @@ bool StfsContainerDevice::STFSFlush() {
       auto byte_str = cvars::device_id.substr(i, 2);
       uint8_t byte = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
       header_.metadata.device_id[i / 2] = byte;
+    }
+  }
+
+  // Copy in title thumbnail
+  auto& title_icon = kernel::kernel_state()->title_icon();
+  if (title_icon.buffer && title_icon.size) {
+    // Only copy in if it's 0x3D00 or less
+    // (we could use std::min here, but there's no use in only copying part of
+    // the icon)
+    if (title_icon.size <= XContentMetadata::kThumbLengthV2) {
+      std::copy_n(title_icon.buffer, title_icon.size,
+                  header_.metadata.title_thumbnail);
+      header_.metadata.title_thumbnail_size =
+          static_cast<uint32_t>(title_icon.size);
     }
   }
 
@@ -1431,7 +1446,7 @@ StfsHashEntry& StfsContainerDevice::STFSGetHashEntry(uint32_t block_num,
   auto& entry = hash_table.entries[entry_num];
   if (hash_in_out) {
     // Copy entry hash to output param
-    memcpy(hash_in_out, entry.sha1, countof(entry.sha1));
+    std::copy_n(entry.sha1, countof(entry.sha1), hash_in_out);
   }
   return entry;
 }
@@ -1451,8 +1466,10 @@ StfsHashTable& StfsContainerDevice::STFSGetDataHashTable(
   }
 
   // Copy our top hash table hash into a temp buffer
+  // TODO: maybe this & hash_in_out params should be uint8_t** instead, so
+  // hashes wouldn't need copying back and forth?
   uint8_t hash[0x14];
-  memcpy(hash, descriptor.stfs.top_hash_table_hash, 0x14);
+  std::copy_n(descriptor.stfs.top_hash_table_hash, sizeof(hash), hash);
 
   // Check upper hash table levels to find which table (primary/secondary) to
   // use.
