@@ -651,10 +651,6 @@ bool StfsContainerDevice::STFSFlush() {
       auto block_num = descriptor.total_block_count - 1;
       STFSBlockMarkDirty(block_num);
 
-      auto new_size = STFSDataBlockToOffset(block_num);
-      xe::filesystem::TruncateStdioFile(package_file, new_size);
-      files_total_size_ = new_size;
-
       descriptor.free_block_count--;
       descriptor.total_block_count--;
 
