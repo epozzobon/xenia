@@ -294,7 +294,14 @@ dword_result_t XeKeysGetConsoleID(lpvoid_t raw_bytes, lpvoid_t hex_string) {
                 reinterpret_cast<uint8_t*>(raw_bytes.host_address()));
   }
   if (hex_string) {
-    // TODO
+    // TODO: check if this is correct!
+    for (int i = 0; i < 5; i++) {
+      auto res = fmt::format("{:02X}", console_cert->console_id[i]);
+      strcpy(reinterpret_cast<char*>(&hex_string[i * 2]), res.c_str());
+    }
+    // hex_string seems to be 0xC bytes, so null-term the end of it
+    hex_string[10] = '\0';
+    hex_string[11] = '\0';
   }
   return 0;
 }

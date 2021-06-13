@@ -27,6 +27,15 @@
 #endif
 
 namespace xe {
+namespace kernel {
+namespace xboxkrnl {
+// xboxkrnl_xekeys.cc
+bool xeKeysConsolePrivateKeySign(const uint8_t* hash,
+                                 X_XE_CONSOLE_SIGNATURE* output_cert_sig);
+dword_result_t XeKeysGetConsoleID(lpvoid_t raw_bytes, lpvoid_t hex_string);
+}  // namespace xboxkrnl
+}  // namespace kernel
+
 namespace vfs {
 
 DEFINE_string(device_id, "0000000000000000000000000000000000000000",
@@ -634,6 +643,8 @@ bool StfsContainerDevice::STFSFlush() {
       kBlockSize;
 
   // Update misc metadata
+  kernel::xboxkrnl::XeKeysGetConsoleID(header_.metadata.console_id, nullptr);
+
   header_.metadata.profile_id = kernel::kernel_state()->user_profile()->xuid();
 
   // Set metadata device_id via ugly hex string -> bytes code...
