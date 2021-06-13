@@ -1129,12 +1129,14 @@ bool StfsContainerDevice::STFSDirectoryRead() {
     xe::filesystem::Seek(file, cur_offset, SEEK_SET);
     fread(&directory, sizeof(directory), 1, file);
 
+    bool end_read = false;
     for (auto cur_entry = 0; cur_entry < countof(directory.entries);
          cur_entry++) {
       auto& dir_entry = directory.entries[cur_entry];
       if (dir_entry.name[0] == 0) {
-        // finished with this block
-        continue;
+        // Finished with the directory
+        end_read = true;
+        break;
       }
 
       StfsContainerEntry* parent_entry = nullptr;
@@ -1218,6 +1220,10 @@ bool StfsContainerDevice::STFSDirectoryRead() {
         }
       }
       parent_entry->children_.emplace_back(std::move(entry));
+    }
+
+    if (end_read) {
+      break;
     }
   }
   XELOGFS("STFS: read {} files from package", all_entries.size());
