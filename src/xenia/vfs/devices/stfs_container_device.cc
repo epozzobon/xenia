@@ -30,8 +30,8 @@ namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 // xboxkrnl_xekeys.cc
-bool xeKeysConsolePrivateKeySign(const uint8_t* hash,
-                                 X_XE_CONSOLE_SIGNATURE* output_cert_sig);
+dword_result_t XeKeysConsolePrivateKeySign(
+    lpvoid_t hash, pointer_t<X_XE_CONSOLE_SIGNATURE> output_cert_sig);
 dword_result_t XeKeysGetConsoleID(lpvoid_t raw_bytes, lpvoid_t hex_string);
 }  // namespace xboxkrnl
 }  // namespace kernel
@@ -626,12 +626,53 @@ bool StfsContainerDevice::STFSFlush() {
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
   auto package_file = main_file();
 
-  // Seek to final allocated block, this should ensure enough space is allocated
-  // for everything?
-  xe::filesystem::Seek(
-      package_file,
-      STFSDataBlockToOffset(descriptor.total_block_count - 1) + kBlockSize,
-      SEEK_SET);
+  // Clear unused space by removing any trailing free blocks from the package
+  if (descriptor.free_block_count > 0) {
+    auto final_block_entry =
+        STFSGetDataHashEntry(descriptor.total_block_count - 1);
+    auto state = final_block_entry.level0_allocation_state();
+    while (descriptor.free_block_count &&
+           (state == StfsHashState::kFree || state == StfsHashState::kFree2)) {
+      auto block_num = descriptor.total_block_count - 1;
+      STFSBlockMarkDirty(block_num);
+
+      auto new_size = STFSDataBlockToOffset(block_num);
+      xe::filesystem::TruncateStdioFile(package_file, new_size);
+      files_total_size_ = new_size;
+
+      descriptor.free_block_count--;
+      descriptor.total_block_count--;
+
+      // Check the new final block...
+      final_block_entry =
+          STFSGetDataHashEntry(descriptor.total_block_count - 1);
+      state = final_block_entry.level0_allocation_state();
+    }
+  }
+
+  // Sanity check
+  if (descriptor.total_block_count > kBlocksPerHashLevel[2]) {
+    XELOGE(
+        "STFS: Too many blocks in package ({} blocks), STFS allows maximum of "
+        "{}!",
+        descriptor.total_block_count, kBlocksPerHashLevel[2]);
+  }
+
+  // Clear unused hash tables
+  // (any hash table with offset above final block is unused)
+  auto final_block_offset =
+      STFSDataBlockToOffset(descriptor.total_block_count - 1) + kBlockSize;
+
+  for (auto it = hash_tables_.begin(); it != hash_tables_.end();) {
+    if (it->first >= final_block_offset)
+      it = hash_tables_.erase(it);
+    else
+      ++it;
+  }
+
+  // Truncate/resize file to final block
+  xe::filesystem::TruncateStdioFile(package_file, final_block_offset);
+  files_total_size_ = final_block_offset;
 
   // Write out directory entries
   STFSDirectoryWrite();
@@ -655,14 +696,6 @@ bool StfsContainerDevice::STFSFlush() {
       uint8_t byte = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
       header_.metadata.device_id[i / 2] = byte;
     }
-  }
-
-  // Sanity check
-  if (descriptor.total_block_count > kBlocksPerHashLevel[2]) {
-    XELOGE(
-        "STFS: Too many blocks in package ({} blocks), STFS allows maximum of "
-        "{}!",
-        descriptor.total_block_count, kBlocksPerHashLevel[2]);
   }
 
   // Fix hashes of any dirty blocks
@@ -697,51 +730,60 @@ bool StfsContainerDevice::STFSFlush() {
       auto& entry = hash_table.entries[entry_num];
 
       auto* block_data = block_buf;
-      // If this is hashing a hash table we have in memory, hash the in-memory
-      // table instead
-      if (hash_level > 0 && hash_tables_.count(block_offset)) {
-        // Since we're looking at the lower hash-tables, we may as well update
-        // our free/unk counters too.
-        auto& lower_table = hash_tables_[block_offset];
 
-        // TODO: maybe should update hash_table.num_blocks around here too?
-        // Need to figure out what StfsHashState that's counting though.
-        uint32_t free_blocks = 0;
-        uint32_t free2_blocks = 0;
-        for (auto& lower_entry : lower_table.entries) {
-          if (hash_level == 1) {
-            // lower_table is an L0 table, check it for kFree/kFree2 entries
-            auto l0_state = lower_entry.level0_allocation_state();
-            if (l0_state == StfsHashState::kFree) {
-              free_blocks++;
-            } else if (l0_state == StfsHashState::kFree2) {
-              free2_blocks++;
+      if (files_total_size_ <= block_offset) {
+        // Package doesn't contain block being hashed, clear the entry for it
+        memset(&entry, 0, sizeof(entry));
+      } else {
+        // If this is hashing a hash table we have in memory, hash the in-memory
+        // table instead
+        if (hash_level > 0 && hash_tables_.count(block_offset)) {
+          // Since we're looking at the lower hash-tables, we may as well update
+          // our free/unk counters too.
+          auto& lower_table = hash_tables_[block_offset];
+
+          // TODO: maybe should update hash_table.num_blocks around here too?
+          // Need to figure out what StfsHashState that's counting though.
+          uint32_t free_blocks = 0;
+          uint32_t free2_blocks = 0;
+          for (auto& lower_entry : lower_table.entries) {
+            if (hash_level == 1) {
+              // lower_table is an L0 table, check it for kFree/kFree2 entries
+              auto l0_state = lower_entry.level0_allocation_state();
+              if (l0_state == StfsHashState::kFree) {
+                free_blocks++;
+              } else if (l0_state == StfsHashState::kFree2) {
+                free2_blocks++;
+              }
+            } else if (hash_level == 2) {
+              // lower_table is an L1 table, add up its free/free2 counters
+              free_blocks += lower_entry.levelN_num_blocks_free();
+              free2_blocks += lower_entry.levelN_num_blocks_unk();
             }
-          } else if (hash_level == 2) {
-            // lower_table is an L1 table, add up its free/free2 counters
-            free_blocks += lower_entry.levelN_num_blocks_free();
-            free2_blocks += lower_entry.levelN_num_blocks_unk();
           }
+
+          entry.set_levelN_num_blocks_free(free_blocks);
+          entry.set_levelN_num_blocks_unk(free2_blocks);
+
+          block_data = reinterpret_cast<uint8_t*>(&lower_table);
+        } else {
+          xe::filesystem::Seek(package_file, block_offset, SEEK_SET);
+          fread(block_buf, 1, 0x1000, package_file);
         }
 
-        entry.set_levelN_num_blocks_free(free_blocks);
-        entry.set_levelN_num_blocks_unk(free2_blocks);
-
-        block_data = reinterpret_cast<uint8_t*>(&lower_table);
-      } else {
-        xe::filesystem::Seek(package_file, block_offset, SEEK_SET);
-        fread(block_buf, 1, 0x1000, package_file);
+        sha1::SHA1 sha;
+        sha.processBytes(block_data, 0x1000);
+        sha.finalize(entry.sha1);
       }
-
-      sha1::SHA1 sha;
-      sha.processBytes(block_data, 0x1000);
-      sha.finalize(entry.sha1);
 
       hashed_offsets.push_back(block_offset);
     }
   }
 
   dirty_blocks_.clear();
+
+  // Unset root_active_index, we always write hash-tables into primary block
+  descriptor.flags.bits.root_active_index = false;
 
   // Write out the hash tables
   for (const auto& table : hash_tables_) {
@@ -758,9 +800,6 @@ bool StfsContainerDevice::STFSFlush() {
   sha1::SHA1 sha;
   sha.processBytes(block_buf, 0x1000);
   sha.finalize(descriptor.top_hash_table_hash);
-
-  // Unset root_active_index, we always write hash-tables into primary block
-  descriptor.flags.bits.root_active_index = false;
 
   // Update XContent metadata
   xe::filesystem::Seek(package_file, 0, SEEK_SET);
@@ -943,13 +982,15 @@ void StfsContainerDevice::STFSDirectoryWrite() {
       auto& chain = STFSGetDataBlockChain(entry->start_block_);
 
       bool contiguous = true;
-      uint32_t next_block = entry->start_block_;
-      for (auto& block : chain) {
-        if (next_block != block) {
-          contiguous = false;
-          break;
+      if (chain.size() > 1) {
+        uint32_t next_block = entry->start_block_;
+        for (auto& block : chain) {
+          if (next_block != block) {
+            contiguous = false;
+            break;
+          }
+          next_block = block + 1;
         }
-        next_block = block + 1;
       }
 
       dir_entry.flags.contiguous = contiguous;
