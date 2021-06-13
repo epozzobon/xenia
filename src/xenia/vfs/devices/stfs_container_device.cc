@@ -641,6 +641,9 @@ bool StfsContainerDevice::STFSFlush() {
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
   auto package_file = main_file();
 
+  // Write out directory entries
+  STFSDirectoryWrite();
+
   // Clear unused space by removing any trailing free blocks from the package
   if (descriptor.free_block_count > 0) {
     auto final_block_entry =
@@ -648,8 +651,8 @@ bool StfsContainerDevice::STFSFlush() {
     auto state = final_block_entry.level0_allocation_state();
     while (descriptor.free_block_count &&
            (state == StfsHashState::kFree || state == StfsHashState::kFree2)) {
-      auto block_num = descriptor.total_block_count - 1;
-      STFSBlockMarkDirty(block_num);
+      // Mark block as dirty so rehash code below clears the hash entry for it
+      STFSBlockMarkDirty(descriptor.total_block_count - 1);
 
       descriptor.free_block_count--;
       descriptor.total_block_count--;
@@ -668,25 +671,6 @@ bool StfsContainerDevice::STFSFlush() {
         "{}!",
         descriptor.total_block_count, kBlocksPerHashLevel[2]);
   }
-
-  // Clear unused hash tables
-  // (any hash table with offset above final block is unused)
-  auto final_block_offset =
-      STFSDataBlockToOffset(descriptor.total_block_count - 1) + kBlockSize;
-
-  for (auto it = hash_tables_.begin(); it != hash_tables_.end();) {
-    if (it->first >= final_block_offset)
-      it = hash_tables_.erase(it);
-    else
-      ++it;
-  }
-
-  // Truncate/resize file to final block
-  xe::filesystem::TruncateStdioFile(package_file, final_block_offset);
-  files_total_size_ = final_block_offset;
-
-  // Write out directory entries
-  STFSDirectoryWrite();
 
   // Update content_size (seems to just be size of all allocated blocks?)
   header_.metadata.content_size =
@@ -808,8 +792,20 @@ bool StfsContainerDevice::STFSFlush() {
 
   dirty_blocks_.clear();
 
-  // Unset root_active_index, we always write hash-tables into primary block
-  descriptor.flags.bits.root_active_index = false;
+  // Truncate/resize file to end of final block
+  files_total_size_ =
+      STFSDataBlockToOffset(descriptor.total_block_count - 1) + kBlockSize;
+
+  xe::filesystem::TruncateStdioFile(package_file, files_total_size_);
+
+  // Clear unused hash tables
+  // (any hash table with offset above final block is unused)
+  for (auto it = hash_tables_.begin(); it != hash_tables_.end();) {
+    if (it->first >= files_total_size_)
+      it = hash_tables_.erase(it);
+    else
+      ++it;
+  }
 
   // Write out the hash tables
   for (const auto& table : hash_tables_) {
@@ -826,6 +822,9 @@ bool StfsContainerDevice::STFSFlush() {
   sha1::SHA1 sha;
   sha.processBytes(block_buf, 0x1000);
   sha.finalize(descriptor.top_hash_table_hash);
+
+  // Unset root_active_index, we always write hash-tables into primary block
+  descriptor.flags.bits.root_active_index = false;
 
   // Update XContent metadata
   xe::filesystem::Seek(package_file, 0, SEEK_SET);
@@ -1598,6 +1597,10 @@ void StfsContainerDevice::STFSBlockFree(uint32_t block_num) {
 
     header_.metadata.volume_descriptor.stfs.free_block_count++;
   }
+
+  // TODO: if this is the last block in the package, truncate package to remove
+  // it and clear space (STFSFlush will do it for us anyway, but it might be
+  // good to have it here too)
 }
 
 uint32_t StfsContainerDevice::STFSBlockAllocate() {
@@ -1609,10 +1612,7 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
   uint32_t block_num = -1;
 
   auto& descriptor = header_.metadata.volume_descriptor.stfs;
-  if (descriptor.free_block_count <= 0) {
-    // No unused blocks available, need to add new one ourselves
-    block_num = descriptor.total_block_count++;
-  } else {
+  if (descriptor.free_block_count > 0) {
     // Apparently we have a free block already allocated, hunt it down...
 
     uint32_t cur_block = 0;
@@ -1645,9 +1645,8 @@ uint32_t StfsContainerDevice::STFSBlockAllocate() {
   }
 
   if (block_num == -1) {
-    XELOGE("STFSBlockAllocate failed to find valid empty block!");
-    assert_always();
-    return -1;
+    // No unused blocks found, need to add new one ourselves
+    block_num = descriptor.total_block_count++;
   }
 
   // Set block hash entry, will also mark block as dirty
