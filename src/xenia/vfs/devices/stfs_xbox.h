@@ -246,13 +246,13 @@ struct XContentAvatarAssetData {
 static_assert_size(XContentAvatarAssetData, 0x24);
 
 struct XContentAttributes {
-  uint8_t profile_transfer : 1;
-  uint8_t device_transfer : 1;
-  uint8_t move_only_transfer : 1;
-  uint8_t kinect_enabled : 1;
-  uint8_t disable_network_storage : 1;
-  uint8_t deep_link_supported : 1;
   uint8_t reserved : 2;
+  uint8_t deep_link_supported : 1;
+  uint8_t disable_network_storage : 1;
+  uint8_t kinect_enabled : 1;
+  uint8_t move_only_transfer : 1;
+  uint8_t device_transfer : 1;
+  uint8_t profile_transfer : 1;
 };
 static_assert_size(XContentAttributes, 1);
 
