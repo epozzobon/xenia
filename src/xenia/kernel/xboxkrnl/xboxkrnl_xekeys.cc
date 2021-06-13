@@ -247,13 +247,15 @@ dword_result_t XeKeysGetKey(dword_t key_idx, lpvoid_t output,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetKey, kNone, kImplemented);
 
-dword_result_t XeKeysGetConsoleCertificate(lpvoid_t output) {
+dword_result_t XeKeysGetConsoleCertificate(
+    pointer_t<X_XE_CONSOLE_CERTIFICATE> output) {
   if (!kXeKeyVaultLoaded) {
     XELOGE(
         "XeKeysGetConsoleCertificate called without keyvault loaded - will "
         "likely cause failures!");
   }
-  xeKeysGetKey(XeKey::CONSOLE_CERTIFICATE, output, nullptr);
+  xeKeysGetKey(XeKey::CONSOLE_CERTIFICATE, (uint8_t*)output.host_address(),
+               nullptr);
   return 0;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetConsoleCertificate, kNone, kImplemented);
@@ -333,8 +335,9 @@ dword_result_t XeKeysQwNeRsaPrvCrypt(dword_t key_idx, pointer_t<uint64_t> input,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysQwNeRsaPrvCrypt, kNone, kImplemented);
 
-bool xeKeysConsolePrivateKeySign(const uint8_t* hash,
-                                 X_XE_CONSOLE_SIGNATURE* output_cert_sig) {
+// Signs the given hash with the loaded keyvaults private-key + console cert
+dword_result_t XeKeysConsolePrivateKeySign(
+    lpvoid_t hash, pointer_t<X_XE_CONSOLE_SIGNATURE> output_cert_sig) {
   // returns BOOL
   if (!kXeKeyVaultLoaded) {
     XELOGE(
@@ -358,14 +361,8 @@ bool xeKeysConsolePrivateKeySign(const uint8_t* hash,
       sig_buf, reinterpret_cast<uint64_t*>(output_cert_sig->signature), 0x10);
 
   // Copy in console cert
-  XeKeysGetConsoleCertificate(output_cert_sig);
+  XeKeysGetConsoleCertificate(&output_cert_sig->console_certificate);
   return true;
-}
-
-// Signs the given hash with the loaded keyvaults private-key + console cert
-dword_result_t XeKeysConsolePrivateKeySign(
-    lpvoid_t hash, pointer_t<X_XE_CONSOLE_SIGNATURE> output_cert_sig) {
-  return xeKeysConsolePrivateKeySign(hash, output_cert_sig);
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysConsolePrivateKeySign, kNone, kImplemented);
 

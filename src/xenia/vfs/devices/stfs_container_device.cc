@@ -803,7 +803,7 @@ bool StfsContainerDevice::STFSFlush() {
   XELOGD(" - Profile ID:     {:016X}", header_.metadata.profile_id);
   XELOGD(" - Device ID:      {}", device_id.to_string());
 
-  xe::kernel::xboxkrnl::xeKeysConsolePrivateKeySign(
+  xe::kernel::xboxkrnl::XeKeysConsolePrivateKeySign(
       header_hash, &header_.header.signature.console);
 
   xe::filesystem::Seek(package_file, 0, SEEK_SET);
