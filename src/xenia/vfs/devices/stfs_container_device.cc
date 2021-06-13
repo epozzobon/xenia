@@ -14,8 +14,11 @@
 #include <vector>
 
 #include "third_party/crypto/TinySHA1.hpp"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/string_buffer.h"
+#include "xenia/kernel/util/shim_utils.h"
 #include "xenia/vfs/devices/stfs_container_entry.h"
 
 #if XE_PLATFORM_WIN32
@@ -25,6 +28,9 @@
 
 namespace xe {
 namespace vfs {
+
+DEFINE_string(device_id, "0000000000000000000000000000000000000000",
+              "Device ID to use for STFS/save packages", "Content");
 
 // Convert FAT timestamp to 100-nanosecond intervals since January 1, 1601 (UTC)
 uint64_t decode_fat_timestamp(uint32_t date, uint32_t time) {
@@ -627,6 +633,20 @@ bool StfsContainerDevice::STFSFlush() {
       uint64_t(descriptor.total_block_count - descriptor.free_block_count) *
       kBlockSize;
 
+  // Update misc metadata
+  header_.metadata.profile_id = kernel::kernel_state()->user_profile()->xuid();
+
+  // Set metadata device_id via ugly hex string -> bytes code...
+  if (!cvars::device_id.empty()) {
+    size_t maxlength = 0x14 * 2;  // device_id length = 0x14
+    maxlength = std::min(maxlength, cvars::device_id.length());
+    for (uint32_t i = 0; i < cvars::device_id.length(); i += 2) {
+      auto byte_str = cvars::device_id.substr(i, 2);
+      uint8_t byte = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+      header_.metadata.device_id[i / 2] = byte;
+    }
+  }
+
   // Sanity check
   if (descriptor.total_block_count > kBlocksPerHashLevel[2]) {
     XELOGE(
@@ -748,6 +768,33 @@ bool StfsContainerDevice::STFSFlush() {
   sha = sha1::SHA1();
   sha.processBytes(metadata_buf.get(), metadata_size);
   sha.finalize(header_.header.content_id);
+
+  // Sign header contents (licenses + content_id)
+  sha = sha1::SHA1();
+  sha.processBytes(&header_.header.licenses, 0x118);
+  uint8_t header_hash[0x14];
+  sha.finalize(header_hash);
+
+  xe::StringBuffer top_level_hash;
+  xe::StringBuffer content_id;
+  xe::StringBuffer header_hash_str;
+  xe::StringBuffer device_id;
+  for (int i = 0; i < 0x14; i++) {
+    top_level_hash.AppendFormat("{:02X}", descriptor.top_hash_table_hash[i]);
+    content_id.AppendFormat("{:02X}", header_.header.content_id[i]);
+    header_hash_str.AppendFormat("{:02X}", header_hash[i]);
+    device_id.AppendFormat("{:02X}", header_.metadata.device_id[i]);
+  }
+
+  XELOGD("STFS details:");
+  XELOGD(" - Top-level hash: {}", top_level_hash.to_string());
+  XELOGD(" - Metadata hash:  {}", content_id.to_string());
+  XELOGD(" - Header hash:    {}", header_hash_str.to_string());
+  XELOGD(" - Profile ID:     {:016X}", header_.metadata.profile_id);
+  XELOGD(" - Device ID:      {}", device_id.to_string());
+
+  xe::kernel::xboxkrnl::xeKeysConsolePrivateKeySign(
+      header_hash, &header_.header.signature.console);
 
   xe::filesystem::Seek(package_file, 0, SEEK_SET);
   fwrite(&header_.header, sizeof(header_.header), 1, package_file);

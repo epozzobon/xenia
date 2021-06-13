@@ -30,6 +30,10 @@
 
 namespace xe {
 namespace kernel {
+namespace xboxkrnl {
+// xboxkrnl_xekeys.cc
+bool xeKeysLoadKeyVault();
+}  // namespace xboxkrnl
 
 constexpr uint32_t kDeferredOverlappedDelayMillis = 100;
 
@@ -253,6 +257,8 @@ object_ref<XThread> KernelState::LaunchModule(object_ref<UserModule> module) {
 
   SetExecutableModule(module);
   XELOGI("KernelState: Launching module...");
+
+  xboxkrnl::xeKeysLoadKeyVault();
 
   // Create a thread to run in.
   // We start suspended so we can run the debugger prep.

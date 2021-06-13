@@ -21,6 +21,12 @@
 #include "xenia/vfs/devices/stfs_xbox.h"
 
 namespace xe {
+namespace kernel {
+namespace xboxkrnl {
+bool xeKeysConsolePrivateKeySign(const uint8_t* hash,
+                                 X_XE_CONSOLE_SIGNATURE* output_cert_sig);
+}
+}  // namespace kernel
 namespace vfs {
 
 // https://free60project.github.io/wiki/STFS.html

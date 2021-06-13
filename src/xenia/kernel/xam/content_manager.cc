@@ -54,12 +54,13 @@ ContentPackage::~ContentPackage() {
 }
 
 vfs::StfsHeader* ContentPackage::GetPackageHeader() {
-  auto device_base = kernel_state_->file_system()->ResolveDevice(device_path_);
+  auto device_base = reinterpret_cast<vfs::StfsContainerDevice*>(
+      kernel_state_->file_system()->ResolveDevice(device_path_));
   if (!device_base) {
     return nullptr;
   }
 
-  return &reinterpret_cast<vfs::StfsContainerDevice*>(device_base)->header();
+  return &device_base->header();
 }
 
 ContentManager::ContentManager(KernelState* kernel_state,

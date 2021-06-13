@@ -102,6 +102,7 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
   RegisterUsbcamExports(export_resolver_, kernel_state_);
   RegisterVideoExports(export_resolver_, kernel_state_);
   RegisterXConfigExports(export_resolver_, kernel_state_);
+  RegisterXeKeysExports(export_resolver_, kernel_state_);
 
   // KeDebugMonitorData (?*)
   // Set to a valid value when a remote debugger is attached.
