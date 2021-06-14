@@ -188,11 +188,12 @@ bool UserModule::TryMountUpdatePackage(const std::string& module_path) {
   auto stfs_header = std::make_unique<vfs::StfsHeader>();
 
   for (auto& update : update_packages) {
-    XELOGD("Checking if TU {} is applicable...", update.file_name());
+    XELOGD("Checking if TU {} is applicable...", update.info.file_name());
     auto result = content_manager->OpenContent(kUpdatePartition, update);
 
     if (XFAILED(result)) {
-      XELOGE("Failed to open TU package {} for reading!", update.file_name());
+      XELOGE("Failed to open TU package {} for reading!",
+             update.info.file_name());
       assert_always();
       continue;
     }
