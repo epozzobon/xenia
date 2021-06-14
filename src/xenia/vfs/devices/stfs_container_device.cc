@@ -79,6 +79,16 @@ std::tuple<uint32_t, uint32_t> encode_fat_timestamp(uint64_t timestamp) {
   return std::make_tuple(date, time);
 }
 
+// Recursively flattens the entry tree to a list of entries
+void FlattenChildEntries(StfsContainerEntry* entry,
+                         std::vector<StfsContainerEntry*>* entry_list) {
+  for (auto& child : entry->children()) {
+    auto* child_entry = reinterpret_cast<StfsContainerEntry*>(child.get());
+    entry_list->push_back(child_entry);
+    FlattenChildEntries(child_entry, entry_list);
+  }
+}
+
 StfsContainerDevice::StfsContainerDevice(const std::string_view mount_path,
                                          const std::filesystem::path& host_path,
                                          bool read_only, bool create)
@@ -94,7 +104,18 @@ StfsContainerDevice::StfsContainerDevice(const std::string_view mount_path,
       blocks_per_hash_table_(1),
       block_step_{0, 0} {}
 
-StfsContainerDevice::~StfsContainerDevice() { CloseFiles(); }
+StfsContainerDevice::~StfsContainerDevice() {
+  // Inform entries that device is no longer valid
+
+  std::vector<StfsContainerEntry*> all_entries;
+  FlattenChildEntries(reinterpret_cast<StfsContainerEntry*>(root_entry_.get()),
+                      &all_entries);
+  for (auto& entry : all_entries) {
+    entry->device_closed_ = true;
+  }
+
+  CloseFiles();
+}
 
 void StfsContainerDevice::Dump(StringBuffer* string_buffer) {
   auto global_lock = global_critical_region_.Acquire();
@@ -909,16 +930,6 @@ bool StfsContainerDevice::STFSReset() {
   descriptor.file_table_block_count = 1;
 
   return true;
-}
-
-// Recursively flattens the entry tree to a list of entries
-void FlattenChildEntries(StfsContainerEntry* entry,
-                         std::vector<StfsContainerEntry*>* entry_list) {
-  for (auto& child : entry->children()) {
-    auto* child_entry = reinterpret_cast<StfsContainerEntry*>(child.get());
-    entry_list->push_back(child_entry);
-    FlattenChildEntries(child_entry, entry_list);
-  }
 }
 
 void StfsContainerDevice::STFSDirectoryWrite() {

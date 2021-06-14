@@ -24,7 +24,8 @@ StfsContainerEntry::StfsContainerEntry(Device* device, Entry* parent,
     : Entry(device, parent, path),
       files_(files),
       start_block_(-1),
-      is_dirty_(false) {}
+      is_dirty_(false),
+      device_closed_(false) {}
 
 StfsContainerEntry::~StfsContainerEntry() = default;
 
@@ -49,6 +50,9 @@ X_STATUS StfsContainerEntry::Open(uint32_t desired_access, File** out_file) {
 bool StfsContainerEntry::set_length(uint32_t new_length) {
   if (new_length == size_) {
     return true;
+  }
+  if (device_closed_) {
+    return false;
   }
 
   auto device = reinterpret_cast<StfsContainerDevice*>(device_);
@@ -79,11 +83,17 @@ bool StfsContainerEntry::set_length(uint32_t new_length) {
 }
 
 bool StfsContainerEntry::is_read_only() {
+  if (device_closed_) {
+    return true;
+  }
   auto device = reinterpret_cast<StfsContainerDevice*>(device_);
   return device->is_read_only();
 }
 
 void StfsContainerEntry::UpdateBlockList() {
+  if (device_closed_) {
+    return;
+  }
   auto device = reinterpret_cast<StfsContainerDevice*>(device_);
   auto block_chain = device->STFSGetDataBlockChain(
       start_block_, StfsContainerDevice::bytes_to_stfs_blocks(size_));
@@ -92,6 +102,10 @@ void StfsContainerEntry::UpdateBlockList() {
 
 void StfsContainerEntry::UpdateBlockList(
     const std::vector<uint32_t>& block_chain) {
+  if (device_closed_) {
+    return;
+  }
+
   auto device = reinterpret_cast<StfsContainerDevice*>(device_);
 
   auto remaining_length = size_;
@@ -112,6 +126,9 @@ std::unique_ptr<Entry> StfsContainerEntry::CreateEntryInternal(
   if (is_read_only()) {
     return nullptr;
   }
+  if (device_closed_) {
+    return nullptr;
+  }
 
   return std::unique_ptr<Entry>(
       StfsContainerEntry::Create(device_, this, name, files_));
@@ -119,6 +136,9 @@ std::unique_ptr<Entry> StfsContainerEntry::CreateEntryInternal(
 
 bool StfsContainerEntry::DeleteEntryInternal(Entry* entry) {
   if (is_read_only()) {
+    return false;
+  }
+  if (device_closed_) {
     return false;
   }
 

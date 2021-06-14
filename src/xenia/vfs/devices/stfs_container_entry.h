@@ -52,6 +52,7 @@ class StfsContainerEntry : public Entry {
 
   bool set_length(uint32_t new_length);
   bool is_read_only();
+  bool is_device_closed() { return device_closed_; }
 
   void mark_dirty() { is_dirty_ = true; }
 
@@ -74,6 +75,8 @@ class StfsContainerEntry : public Entry {
   // If any writes have happened to the file, mark it dirty so we can rehash the
   // blocks for it
   bool is_dirty_ = false;
+
+  bool device_closed_ = false;
 
   std::vector<BlockRecord> block_list_;
 };

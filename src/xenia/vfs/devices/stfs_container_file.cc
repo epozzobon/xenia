@@ -27,6 +27,9 @@ StfsContainerFile::~StfsContainerFile() = default;
 
 void StfsContainerFile::Destroy() {
   // Flush the STFS device whenever a file is closed:
+  if (entry_->is_device_closed()) {
+    return;
+  }
   auto device = reinterpret_cast<StfsContainerDevice*>(entry_->device());
   device->STFSFlush();
   delete this;
@@ -35,6 +38,9 @@ void StfsContainerFile::Destroy() {
 X_STATUS StfsContainerFile::ReadSync(void* buffer, size_t buffer_length,
                                      size_t byte_offset,
                                      size_t* out_bytes_read) {
+  if (entry_->is_device_closed()) {
+    return X_STATUS_INVALID_HANDLE;
+  }
   if (byte_offset >= entry_->size()) {
     return X_STATUS_END_OF_FILE;
   }
@@ -76,6 +82,10 @@ X_STATUS StfsContainerFile::ReadSync(void* buffer, size_t buffer_length,
 X_STATUS StfsContainerFile::WriteSync(const void* buffer, size_t buffer_length,
                                       size_t byte_offset,
                                       size_t* out_bytes_written) {
+  if (entry_->is_device_closed()) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+
   if (!(file_access_ &
         (FileAccess::kFileWriteData | FileAccess::kFileAppendData)) ||
       entry_->is_read_only()) {
@@ -129,6 +139,10 @@ X_STATUS StfsContainerFile::WriteSync(const void* buffer, size_t buffer_length,
 }
 
 X_STATUS StfsContainerFile::SetLength(size_t length) {
+  if (entry_->is_device_closed()) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+
   if (!(file_access_ & FileAccess::kFileWriteData) || entry_->is_read_only()) {
     return X_STATUS_ACCESS_DENIED;
   }
