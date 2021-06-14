@@ -106,6 +106,16 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
     return result;
   }
 
+  if (!kernel_state()->title_id()) {
+    // Try setting title ID from this module, for ContentManager to work with
+    // our title
+    xex2_opt_execution_info* exec_info = nullptr;
+    xex_module()->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
+    if (exec_info) {
+      kernel_state()->set_title_id(exec_info->title_id);
+    }
+  }
+
   if (!cvars::xex_apply_patches) {
     // XEX patches disabled, skip trying to load them
     return LoadXexContinue();
@@ -113,9 +123,6 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
 
   auto module_path = fs_entry->path();
   TryMountUpdatePackage(module_path);
-
-  // Unset any content_manager title ID overrides
-  kernel_state()->content_manager()->SetTitleIdOverride(0);
 
   // Search for xexp patch file, first check if it exists at update:\ root
   auto patch_entry =
@@ -174,11 +181,6 @@ bool UserModule::TryMountUpdatePackage(const std::string& module_path) {
   }
 
   auto content_manager = kernel_state()->content_manager();
-  if (exec_info && !exec_module_info) {
-    // Only set override if we don't have an executable module yet/exe
-    // module doesn't have execution info
-    content_manager->SetTitleIdOverride(exec_info->title_id);
-  }
 
   auto update_packages =
       content_manager->ListContent(0, XContentType::kInstaller);

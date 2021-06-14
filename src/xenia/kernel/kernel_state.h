@@ -97,7 +97,9 @@ class KernelState {
   cpu::Processor* processor() const { return processor_; }
   vfs::VirtualFileSystem* file_system() const { return file_system_; }
 
-  uint32_t title_id() const;
+  uint32_t title_id() const { return title_id_; }
+  void set_title_id(uint32_t value) { title_id_ = value; }
+
   std::string title_name() const;
   XLanguage title_language() const {
     return title_spa_data_.is_valid() ? title_spa_data_.default_language()
@@ -228,6 +230,7 @@ class KernelState {
   std::vector<object_ref<UserModule>> user_modules_;
   std::vector<TerminateNotification> terminate_notifications_;
 
+  uint32_t title_id_;
   util::XdbfGameData title_spa_data_;
 
   uint32_t process_info_block_address_ = 0;

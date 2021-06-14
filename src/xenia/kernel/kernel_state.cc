@@ -94,19 +94,6 @@ KernelState::~KernelState() {
 
 KernelState* KernelState::shared() { return shared_kernel_state_; }
 
-uint32_t KernelState::title_id() const {
-  assert_not_null(executable_module_);
-
-  xex2_opt_execution_info* exec_info = 0;
-  executable_module_->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &exec_info);
-
-  if (exec_info) {
-    return exec_info->title_id;
-  }
-
-  return 0;
-}
-
 std::string KernelState::title_name() const {
   if (!title_spa_data_.is_valid()) {
     return "Unknown title";
