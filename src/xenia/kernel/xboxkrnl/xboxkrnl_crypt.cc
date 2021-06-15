@@ -522,7 +522,7 @@ void XeCryptBnDwLePkcs1Format(lpvoid_t hash, dword_t format,
   if (output_sig_size - 39 > 473) return;
 
   output_sig[output_sig_size - 1] = 0;
-  output_sig[output_sig_size - 1] = 1;
+  output_sig[output_sig_size - 2] = 1;
 
   auto* hash_ptr = reinterpret_cast<uint8_t*>(hash.host_address());
 

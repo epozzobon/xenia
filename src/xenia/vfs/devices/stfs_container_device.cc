@@ -106,7 +106,10 @@ StfsContainerDevice::StfsContainerDevice(const std::string_view mount_path,
 
 StfsContainerDevice::~StfsContainerDevice() {
   // Inform entries that device is no longer valid
-
+  // This is needed for some games that close file handles _after_ the device
+  // itself, so STFSFlush or any other things performed by the file during
+  // destruction won't have a valid device to use
+  // Not sure if there's any better way to handle those cases...
   std::vector<StfsContainerEntry*> all_entries;
   FlattenChildEntries(reinterpret_cast<StfsContainerEntry*>(root_entry_.get()),
                       &all_entries);
