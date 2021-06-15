@@ -86,8 +86,8 @@ std::filesystem::path ContentManager::ResolvePackagePath(
     const XCONTENT_AGGREGATE_DATA& data) {
   // Content path:
   // content_root/title_id/content_type/data_file_name
-  auto package_root = ResolvePackageRoot(data.info.content_type, data.title_id);
-  return package_root / xe::to_path(data.info.file_name());
+  auto package_root = ResolvePackageRoot(data.content_type, data.title_id);
+  return package_root / xe::to_path(data.file_name());
 }
 
 std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(
@@ -135,15 +135,15 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(
     }
 
     XCONTENT_AGGREGATE_DATA content_data;
-    content_data.info.device_id = device_id;
-    content_data.info.content_type = device->header().metadata.content_type;
+    content_data.device_id = device_id;
+    content_data.content_type = device->header().metadata.content_type;
 
     // Get display name in the titles default language, as some JP games seem to
     // expect the japanese display_name value
-    content_data.info.set_display_name(device->header().metadata.display_name(
+    content_data.set_display_name(device->header().metadata.display_name(
         kernel_state_->title_language()));
 
-    content_data.info.set_file_name(path_to_utf8(file_info.name));
+    content_data.set_file_name(path_to_utf8(file_info.name));
     content_data.title_id = title_id;
 
     result.emplace_back(std::move(content_data));
@@ -228,11 +228,10 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name,
       xe::to_utf16(kernel_state_->emulator()->title_name()));
 
   // Now copy data from XCONTENT_DATA into package headers
-  header->metadata.content_type = data.info.content_type;
+  header->metadata.content_type = data.content_type;
 
   // TODO: use users chosen language instead?
-  header->metadata.set_display_name(XLanguage::kEnglish,
-                                    data.info.display_name());
+  header->metadata.set_display_name(XLanguage::kEnglish, data.display_name());
 
   // TODO: set profile ID to the offline XUID (0xE0....)
   header->metadata.profile_id = kernel_state_->user_profile()->xuid();

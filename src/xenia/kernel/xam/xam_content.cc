@@ -101,7 +101,7 @@ dword_result_t XamContentCreateEnumerator(dword_t user_index, dword_t device_id,
     for (const auto& content_data : content_datas) {
       auto item = reinterpret_cast<XCONTENT_DATA*>(e->AppendItem());
       assert_not_null(item);
-      *item = content_data.info;
+      *item = content_data;
     }
   }
 
@@ -128,16 +128,10 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
 
   XCONTENT_AGGREGATE_DATA content_data;
   if (content_data_size == sizeof(XCONTENT_DATA)) {
-    content_data.info = *content_data_ptr.as<XCONTENT_DATA*>();
+    content_data = {*content_data_ptr.as<XCONTENT_DATA*>()};
     content_data.title_id = -1;
-  } else if (content_data_size == sizeof(XCONTENT_INTERNAL_DATA)) {
-    auto* internal_data = content_data_ptr.as<XCONTENT_INTERNAL_DATA*>();
-    content_data.info = internal_data->info;
-    content_data.title_id = internal_data->title_id;
   } else if (content_data_size == sizeof(XCONTENT_AGGREGATE_DATA)) {
     content_data = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
-  } else {
-    assert_always();
   }
 
   auto content_manager = kernel_state()->content_manager();
@@ -255,7 +249,7 @@ dword_result_t XamContentCreateInternal(
     lpdword_t disposition_ptr, lpdword_t license_mask_ptr, dword_t cache_size,
     qword_t content_size, lpvoid_t overlapped_ptr) {
   return xeXamContentCreate(0xFE, root_name, content_data_ptr,
-                            sizeof(XCONTENT_INTERNAL_DATA), flags,
+                            sizeof(XCONTENT_AGGREGATE_DATA), flags,
                             disposition_ptr, license_mask_ptr, cache_size,
                             content_size, overlapped_ptr);
 }

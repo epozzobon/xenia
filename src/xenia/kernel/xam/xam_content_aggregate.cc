@@ -65,10 +65,10 @@ void AddODDContentTest(object_ref<XStaticEnumerator> e,
         auto item = reinterpret_cast<XCONTENT_AGGREGATE_DATA*>(e->AppendItem());
         assert_not_null(item);
         item = {0};
-        item->info.device_id = static_cast<uint32_t>(DummyDeviceId::ODD);
-        item->info.content_type = content_type;
-        item->info.set_display_name(to_utf16(content_entry->name()));
-        item->info.set_file_name(content_entry->name());
+        item->device_id = static_cast<uint32_t>(DummyDeviceId::ODD);
+        item->content_type = content_type;
+        item->set_display_name(to_utf16(content_entry->name()));
+        item->set_file_name(content_entry->name());
         item->title_id = title_id;
       }
     }

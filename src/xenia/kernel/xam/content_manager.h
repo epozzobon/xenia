@@ -103,32 +103,19 @@ struct XCONTENT_DATA {
 };
 static_assert_size(XCONTENT_DATA, 308);
 
-struct XCONTENT_AGGREGATE_DATA {
-  XCONTENT_DATA info;
+struct XCONTENT_AGGREGATE_DATA : XCONTENT_DATA {
+  be<uint64_t> unk134;  // XUID?
   be<uint32_t> title_id;
 
   bool operator==(const XCONTENT_AGGREGATE_DATA& other) const {
     // Package is located via device_id/title_id/content_type/file_name, so only
     // need to compare those
-    return title_id == other.title_id && info == other.info;
+    return device_id == other.device_id && title_id == other.title_id &&
+           content_type == other.content_type &&
+           file_name() == other.file_name();
   }
 };
-static_assert_size(XCONTENT_AGGREGATE_DATA, 312);
-
-struct XCONTENT_INTERNAL_DATA {
-  XCONTENT_DATA info;
-  be<uint64_t> unk134;
-  be<uint32_t> title_id;
-
-  bool operator==(const XCONTENT_INTERNAL_DATA& other) const {
-    // Package is located via device_id/title_id/content_type/file_name, so only
-    // need to compare those
-    return info == other.info && unk134 == other.unk134 &&
-           title_id == other.title_id;
-    // unk144 == other.unk144;
-  }
-};
-static_assert_size(XCONTENT_INTERNAL_DATA, 0x148);
+static_assert_size(XCONTENT_AGGREGATE_DATA, 0x148);
 
 class ContentPackage {
  public:
