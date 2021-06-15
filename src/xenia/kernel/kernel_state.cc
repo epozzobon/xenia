@@ -49,6 +49,7 @@ KernelState::KernelState(Emulator* emulator)
       memory_(emulator->memory()),
       dispatch_thread_running_(false),
       dpc_list_(emulator->memory()),
+      title_id_(0),
       title_spa_data_(nullptr, 0) {
   processor_ = emulator->processor();
   file_system_ = emulator->file_system();
