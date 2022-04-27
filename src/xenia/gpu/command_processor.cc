@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -41,19 +41,18 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
       trace_writer_(graphics_system->memory()->physical_membase()),
       worker_running_(true),
       write_ptr_index_event_(xe::threading::Event::CreateAutoResetEvent(false)),
-      write_ptr_index_(0) {}
+      write_ptr_index_(0) {
+  assert_not_null(write_ptr_index_event_);
+}
 
 CommandProcessor::~CommandProcessor() = default;
 
-bool CommandProcessor::Initialize(
-    std::unique_ptr<xe::ui::GraphicsContext> context) {
-  context_ = std::move(context);
-
+bool CommandProcessor::Initialize() {
   // Initialize the gamma ramps to their default (linear) values - taken from
   // what games set when starting.
   for (uint32_t i = 0; i < 256; ++i) {
     uint32_t value = i * 1023 / 255;
-    gamma_ramp_.normal[i].value = value | (value << 10) | (value << 20);
+    gamma_ramp_.table[i].value = value | (value << 10) | (value << 20);
   }
   for (uint32_t i = 0; i < 128; ++i) {
     uint32_t value = (i * 65535 / 127) & ~63;
@@ -64,7 +63,7 @@ bool CommandProcessor::Initialize(
       gamma_ramp_.pwl[i].values[j].value = value;
     }
   }
-  dirty_gamma_ramp_normal_ = true;
+  dirty_gamma_ramp_table_ = true;
   dirty_gamma_ramp_pwl_ = true;
 
   worker_running_ = true;
@@ -140,8 +139,18 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
 
 void CommandProcessor::ClearCaches() {}
 
+void CommandProcessor::SetDesiredSwapPostEffect(
+    SwapPostEffect swap_post_effect) {
+  if (swap_post_effect_desired_ == swap_post_effect) {
+    return;
+  }
+  swap_post_effect_desired_ = swap_post_effect;
+  CallInThread([this, swap_post_effect]() {
+    swap_post_effect_actual_ = swap_post_effect;
+  });
+}
+
 void CommandProcessor::WorkerThreadMain() {
-  context_->MakeCurrent();
   if (!SetupContext()) {
     xe::FatalError("Unable to setup command processor internal state");
     return;
@@ -212,9 +221,6 @@ void CommandProcessor::Pause() {
     threading::Thread::GetCurrentThread()->Suspend();
   });
 
-  // HACK - Prevents a hang in IssueSwap()
-  swap_state_.pending = false;
-
   fence.Wait();
 }
 
@@ -255,7 +261,7 @@ bool CommandProcessor::Restore(ByteStream* stream) {
 
 bool CommandProcessor::SetupContext() { return true; }
 
-void CommandProcessor::ShutdownContext() { context_.reset(); }
+void CommandProcessor::ShutdownContext() {}
 
 void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
   read_ptr_index_ = 0;
@@ -326,14 +332,17 @@ void CommandProcessor::UpdateGammaRampValue(GammaRampType type,
 
   if (mask_lo) {
     switch (type) {
-      case GammaRampType::kNormal:
+      case GammaRampType::kTable:
         assert_true(regs->values[XE_GPU_REG_DC_LUT_RW_MODE].u32 == 0);
-        gamma_ramp_.normal[index].value = value;
-        dirty_gamma_ramp_normal_ = true;
+        gamma_ramp_.table[index].value = value;
+        dirty_gamma_ramp_table_ = true;
         break;
       case GammaRampType::kPWL:
         assert_true(regs->values[XE_GPU_REG_DC_LUT_RW_MODE].u32 == 1);
-        gamma_ramp_.pwl[index].values[gamma_ramp_rw_subindex_].value = value;
+        // The lower 6 bits are hardwired to 0.
+        // https://developer.amd.com/wordpress/media/2012/10/RRG-216M56-03oOEM.pdf
+        gamma_ramp_.pwl[index].values[gamma_ramp_rw_subindex_].value =
+            value & ~(uint32_t(63) | (uint32_t(63) << 16));
         gamma_ramp_rw_subindex_ = (gamma_ramp_rw_subindex_ + 1) % 3;
         dirty_gamma_ramp_pwl_ = true;
         break;
@@ -385,51 +394,6 @@ void CommandProcessor::PrepareForWait() { trace_writer_.Flush(); }
 
 void CommandProcessor::ReturnFromWait() {}
 
-void CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
-                                 uint32_t frontbuffer_width,
-                                 uint32_t frontbuffer_height) {
-  SCOPE_profile_cpu_f("gpu");
-  if (!swap_request_handler_) {
-    return;
-  }
-
-  // If there was a swap pending we drop it on the floor.
-  // This prevents the display from pulling the backbuffer out from under us.
-  // If we skip a lot then we may need to buffer more, but as the display
-  // thread should be fairly idle that shouldn't happen.
-  if (!cvars::vsync) {
-    std::lock_guard<std::mutex> lock(swap_state_.mutex);
-    if (swap_state_.pending) {
-      swap_state_.pending = false;
-      // TODO(benvanik): frame skip counter.
-      XELOGW("Skipped frame!");
-    }
-  } else {
-    // Spin until no more pending swap.
-    while (worker_running_) {
-      {
-        std::lock_guard<std::mutex> lock(swap_state_.mutex);
-        if (!swap_state_.pending) {
-          break;
-        }
-      }
-      xe::threading::MaybeYield();
-    }
-  }
-
-  PerformSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
-
-  {
-    // Set pending so that the display will swap the next time it can.
-    std::lock_guard<std::mutex> lock(swap_state_.mutex);
-    swap_state_.pending = true;
-  }
-
-  // Notify the display a swap is pending so that our changes are picked up.
-  // It does the actual front/back buffer swap.
-  swap_request_handler_();
-}
-
 uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
                                                 uint32_t write_index) {
   SCOPE_profile_cpu_f("gpu");
@@ -440,7 +404,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
     uint32_t title_id = kernel_state_->GetExecutableModule()
                             ? kernel_state_->GetExecutableModule()->title_id()
                             : 0;
-    auto file_name = fmt::format("{:8X}_stream.xtr", title_id);
+    auto file_name = fmt::format("{:08X}_stream.xtr", title_id);
     auto path = trace_stream_path_ / file_name;
     trace_writer_.Open(path, title_id);
     InitializeTrace();
@@ -515,6 +479,10 @@ bool CommandProcessor::ExecutePacket(RingBuffer* reader) {
     trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 1);
     trace_writer_.WritePacketEnd();
     return true;
+  }
+
+  if (packet == 0xCDCDCDCD) {
+    XELOGW("GPU packet is CDCDCDCD - probably read uninitialized memory!");
   }
 
   switch (packet_type) {
@@ -734,7 +702,7 @@ bool CommandProcessor::ExecutePacketType3(RingBuffer* reader, uint32_t packet) {
       break;
     }
     case PM4_WAIT_FOR_IDLE: {
-      // This opcode is used by "Duke Nukem Forever" while going/being ingame
+      // This opcode is used by 5454084E while going / being ingame.
       assert_true(count == 1);
       uint32_t value = reader->ReadAndSwap<uint32_t>();
       XELOGGPU("GPU wait for idle = {:08X}", value);
@@ -763,7 +731,7 @@ bool CommandProcessor::ExecutePacketType3(RingBuffer* reader, uint32_t packet) {
     } else if (trace_state_ == TraceState::kSingleFrame) {
       // New trace request - we only start tracing at the beginning of a frame.
       uint32_t title_id = kernel_state_->GetExecutableModule()->title_id();
-      auto file_name = fmt::format("{:8X}_{}.xtr", title_id, counter_ - 1);
+      auto file_name = fmt::format("{:08X}_{}.xtr", title_id, counter_ - 1);
       auto path = trace_frame_path_ / file_name;
       trace_writer_.Open(path, title_id);
       InitializeTrace();
@@ -824,8 +792,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(RingBuffer* reader,
   // VdSwap will post this to tell us we need to swap the screen/fire an
   // interrupt.
   // 63 words here, but only the first has any data.
-  uint32_t magic = reader->ReadAndSwap<uint32_t>();
-  assert_true(magic == 'SWAP');
+  uint32_t magic = reader->ReadAndSwap<fourcc_t>();
+  assert_true(magic == kSwapSignature);
 
   // TODO(benvanik): only swap frontbuffer ptr.
   uint32_t frontbuffer_ptr = reader->ReadAndSwap<uint32_t>();
@@ -833,7 +801,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(RingBuffer* reader,
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
-  if (swap_mode_ == SwapMode::kNormal) {
+  if (!ignore_swap_) {
     IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
   }
 
@@ -1145,6 +1113,8 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(RingBuffer* reader,
 bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
                                                           uint32_t packet,
                                                           uint32_t count) {
+  // Set by D3D as BE but struct ABI is LE
+  const uint32_t kQueryFinished = xe::byte_swap(0xFFFFFEED);
   assert_true(count == 1);
   uint32_t initiator = reader->ReadAndSwap<uint32_t>();
   // Writeback initiator.
@@ -1160,10 +1130,13 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
             register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR].u32);
     // 0xFFFFFEED is written to this two locations by D3D only on D3DISSUE_END
     // and used to detect a finished query.
-    bool isEnd = pSampleCounts->ZPass_A == xe::byte_swap(0xFFFFFEED) &&
-                 pSampleCounts->ZPass_B == xe::byte_swap(0xFFFFFEED);
+    bool is_end_via_z_pass = pSampleCounts->ZPass_A == kQueryFinished &&
+                             pSampleCounts->ZPass_B == kQueryFinished;
+    // Older versions of D3D also checks for ZFail (4D5307D5).
+    bool is_end_via_z_fail = pSampleCounts->ZFail_A == kQueryFinished &&
+                             pSampleCounts->ZFail_B == kQueryFinished;
     std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
-    if (isEnd) {
+    if (is_end_via_z_pass || is_end_via_z_fail) {
       pSampleCounts->ZPass_A = fake_sample_count;
       pSampleCounts->Total_A = fake_sample_count;
     }
@@ -1172,40 +1145,77 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
   return true;
 }
 
-bool CommandProcessor::ExecutePacketType3_DRAW_INDX(RingBuffer* reader,
-                                                    uint32_t packet,
-                                                    uint32_t count) {
-  // initiate fetch of index buffer and draw
-  // if dword0 != 0, this is a conditional draw based on viz query.
+bool CommandProcessor::ExecutePacketType3Draw(RingBuffer* reader,
+                                              uint32_t packet,
+                                              const char* opcode_name,
+                                              uint32_t viz_query_condition,
+                                              uint32_t count_remaining) {
+  // if viz_query_condition != 0, this is a conditional draw based on viz query.
   // This ID matches the one issued in PM4_VIZ_QUERY
-  uint32_t dword0 = reader->ReadAndSwap<uint32_t>();  // viz query info
-  // uint32_t viz_id = dword0 & 0x3F;
+  // uint32_t viz_id = viz_query_condition & 0x3F;
   // when true, render conditionally based on query result
-  // uint32_t viz_use = dword0 & 0x100;
+  // uint32_t viz_use = viz_query_condition & 0x100;
 
+  assert_not_zero(count_remaining);
+  if (!count_remaining) {
+    XELOGE("{}: Packet too small, can't read VGT_DRAW_INITIATOR", opcode_name);
+    return false;
+  }
   reg::VGT_DRAW_INITIATOR vgt_draw_initiator;
   vgt_draw_initiator.value = reader->ReadAndSwap<uint32_t>();
+  --count_remaining;
   WriteRegister(XE_GPU_REG_VGT_DRAW_INITIATOR, vgt_draw_initiator.value);
 
+  bool success = true;
+  // TODO(Triang3l): Remove IndexBufferInfo and replace handling of all this
+  // with PrimitiveProcessor when the old Vulkan renderer is removed.
   bool is_indexed = false;
   IndexBufferInfo index_buffer_info;
   switch (vgt_draw_initiator.source_select) {
     case xenos::SourceSelect::kDMA: {
       // Indexed draw.
       is_indexed = true;
-      index_buffer_info.guest_base = reader->ReadAndSwap<uint32_t>();
-      uint32_t index_size = reader->ReadAndSwap<uint32_t>();
-      index_buffer_info.endianness =
-          static_cast<xenos::Endian>(index_size >> 30);
-      index_size &= 0x00FFFFFF;
+
+      // Two separate bounds checks so if there's only one missing register
+      // value out of two, one uint32_t will be skipped in the command buffer,
+      // not two.
+      assert_not_zero(count_remaining);
+      if (!count_remaining) {
+        XELOGE("{}: Packet too small, can't read VGT_DMA_BASE", opcode_name);
+        return false;
+      }
+      uint32_t vgt_dma_base = reader->ReadAndSwap<uint32_t>();
+      --count_remaining;
+      WriteRegister(XE_GPU_REG_VGT_DMA_BASE, vgt_dma_base);
+      reg::VGT_DMA_SIZE vgt_dma_size;
+      assert_not_zero(count_remaining);
+      if (!count_remaining) {
+        XELOGE("{}: Packet too small, can't read VGT_DMA_SIZE", opcode_name);
+        return false;
+      }
+      vgt_dma_size.value = reader->ReadAndSwap<uint32_t>();
+      --count_remaining;
+      WriteRegister(XE_GPU_REG_VGT_DMA_SIZE, vgt_dma_size.value);
+
+      uint32_t index_size_bytes =
+          vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16
+              ? sizeof(uint16_t)
+              : sizeof(uint32_t);
+      // The base address must already be word-aligned according to the R6xx
+      // documentation, but for safety.
+      index_buffer_info.guest_base = vgt_dma_base & ~(index_size_bytes - 1);
+      index_buffer_info.endianness = vgt_dma_size.swap_mode;
       index_buffer_info.format = vgt_draw_initiator.index_size;
-      index_size *=
-          (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32) ? 4 : 2;
-      index_buffer_info.length = index_size;
+      index_buffer_info.length = vgt_dma_size.num_words * index_size_bytes;
       index_buffer_info.count = vgt_draw_initiator.num_indices;
     } break;
     case xenos::SourceSelect::kImmediate: {
       // TODO(Triang3l): VGT_IMMED_DATA.
+      XELOGE(
+          "{}: Using immediate vertex indices, which are not supported yet. "
+          "Report the game to Xenia developers!",
+          opcode_name, uint32_t(vgt_draw_initiator.source_select));
+      success = false;
       assert_always();
     } break;
     case xenos::SourceSelect::kAutoIndex: {
@@ -1214,71 +1224,65 @@ bool CommandProcessor::ExecutePacketType3_DRAW_INDX(RingBuffer* reader,
       index_buffer_info.length = 0;
     } break;
     default: {
-      // Invalid source select.
-      assert_always();
+      // Invalid source selection.
+      success = false;
+      assert_unhandled_case(vgt_draw_initiator.source_select);
     } break;
   }
 
-  auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
-  if (viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z) {
-    // TODO(Triang3l): Don't drop the draw call completely if the vertex shader
-    // has memexport.
-    // TODO(Triang3l || JoelLinn): Handle this properly in the render backends.
-    return true;
+  // Skip to the next command, for example, if there are immediate indexes that
+  // we don't support yet.
+  reader->AdvanceRead(count_remaining * sizeof(uint32_t));
+
+  if (success) {
+    auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
+    if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
+      // TODO(Triang3l): Don't drop the draw call completely if the vertex
+      // shader has memexport.
+      // TODO(Triang3l || JoelLinn): Handle this properly in the render
+      // backends.
+      success = IssueDraw(
+          vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+          is_indexed ? &index_buffer_info : nullptr,
+          xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
+                                     vgt_draw_initiator.prim_type));
+      if (!success) {
+        XELOGE("{}({}, {}, {}): Failed in backend", opcode_name,
+               vgt_draw_initiator.num_indices,
+               uint32_t(vgt_draw_initiator.prim_type),
+               uint32_t(vgt_draw_initiator.source_select));
+      }
+    }
   }
 
-  bool success =
-      IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
-                is_indexed ? &index_buffer_info : nullptr,
-                xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
-                                           vgt_draw_initiator.prim_type));
-  if (!success) {
-    XELOGE("PM4_DRAW_INDX({}, {}, {}): Failed in backend",
-           vgt_draw_initiator.num_indices,
-           uint32_t(vgt_draw_initiator.prim_type),
-           uint32_t(vgt_draw_initiator.source_select));
-  }
+  return success;
+}
 
-  return true;
+bool CommandProcessor::ExecutePacketType3_DRAW_INDX(RingBuffer* reader,
+                                                    uint32_t packet,
+                                                    uint32_t count) {
+  // "initiate fetch of index buffer and draw"
+  // Generally used by Xbox 360 Direct3D 9 for kDMA and kAutoIndex sources.
+  // With a viz query token as the first one.
+  uint32_t count_remaining = count;
+  assert_not_zero(count_remaining);
+  if (!count_remaining) {
+    XELOGE("PM4_DRAW_INDX: Packet too small, can't read the viz query token");
+    return false;
+  }
+  uint32_t viz_query_condition = reader->ReadAndSwap<uint32_t>();
+  --count_remaining;
+  return ExecutePacketType3Draw(reader, packet, "PM4_DRAW_INDX",
+                                viz_query_condition, count_remaining);
 }
 
 bool CommandProcessor::ExecutePacketType3_DRAW_INDX_2(RingBuffer* reader,
                                                       uint32_t packet,
                                                       uint32_t count) {
-  // draw using supplied indices in packet
-  reg::VGT_DRAW_INITIATOR vgt_draw_initiator;
-  vgt_draw_initiator.value = reader->ReadAndSwap<uint32_t>();
-  WriteRegister(XE_GPU_REG_VGT_DRAW_INITIATOR, vgt_draw_initiator.value);
-  assert_true(vgt_draw_initiator.source_select ==
-              xenos::SourceSelect::kAutoIndex);
-  // Index buffer unused as automatic.
-  // uint32_t indices_size =
-  //     vgt_draw_initiator.num_indices *
-  //         (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32 ? 4
-  //                                                                      : 2);
-  // uint32_t index_ptr = reader->ptr();
-  // TODO(Triang3l): VGT_IMMED_DATA.
-  reader->AdvanceRead((count - 1) * sizeof(uint32_t));
-
-  auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
-  if (viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z) {
-    // TODO(Triang3l): Don't drop the draw call completely if the vertex shader
-    // has memexport.
-    // TODO(Triang3l || JoelLinn): Handle this properly in the render backends.
-    return true;
-  }
-
-  bool success = IssueDraw(
-      vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices, nullptr,
-      xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
-                                 vgt_draw_initiator.prim_type));
-  if (!success) {
-    XELOGE("PM4_DRAW_INDX_IMM({}, {}): Failed in backend",
-           vgt_draw_initiator.num_indices,
-           uint32_t(vgt_draw_initiator.prim_type));
-  }
-
-  return true;
+  // "draw using supplied indices in packet"
+  // Generally used by Xbox 360 Direct3D 9 for kAutoIndex source.
+  // No viz query token.
+  return ExecutePacketType3Draw(reader, packet, "PM4_DRAW_INDX_2", 0, count);
 }
 
 bool CommandProcessor::ExecutePacketType3_SET_CONSTANT(RingBuffer* reader,

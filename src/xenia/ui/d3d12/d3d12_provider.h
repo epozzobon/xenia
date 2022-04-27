@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -23,15 +23,17 @@ namespace d3d12 {
 
 class D3D12Provider : public GraphicsProvider {
  public:
-  ~D3D12Provider() override;
+  ~D3D12Provider();
 
   static bool IsD3D12APIAvailable();
 
-  static std::unique_ptr<D3D12Provider> Create(Window* main_window);
+  static std::unique_ptr<D3D12Provider> Create();
 
-  std::unique_ptr<GraphicsContext> CreateContext(
-      Window* target_window) override;
-  std::unique_ptr<GraphicsContext> CreateOffscreenContext() override;
+  std::unique_ptr<Presenter> CreatePresenter(
+      Presenter::HostGpuLossCallback host_gpu_loss_callback =
+          Presenter::FatalErrorHostGpuLossCallback) override;
+
+  std::unique_ptr<ImmediateDrawer> CreateImmediateDrawer() override;
 
   IDXGIFactory2* GetDXGIFactory() const { return dxgi_factory_; }
   // nullptr if PIX not attached.
@@ -110,7 +112,7 @@ class D3D12Provider : public GraphicsProvider {
     return virtual_address_bits_per_resource_;
   }
 
-  // Proxies for Direct3D 12 functions since they are loaded dynamically.
+  // Proxies for DirectX functions since they are loaded dynamically.
   HRESULT SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC* desc,
                                  D3D_ROOT_SIGNATURE_VERSION version,
                                  ID3DBlob** blob_out,
@@ -142,7 +144,7 @@ class D3D12Provider : public GraphicsProvider {
   }
 
  private:
-  explicit D3D12Provider(Window* main_window);
+  D3D12Provider() = default;
 
   static bool EnableIncreaseBasePriorityPrivilege();
   bool Initialize();
@@ -154,7 +156,8 @@ class D3D12Provider : public GraphicsProvider {
 
   HMODULE library_dxgi_ = nullptr;
   PFNCreateDXGIFactory2 pfn_create_dxgi_factory2_;
-  PFNDXGIGetDebugInterface1 pfn_dxgi_get_debug_interface1_;
+  // Needed during shutdown as well to report live objects, so may be nullptr.
+  PFNDXGIGetDebugInterface1 pfn_dxgi_get_debug_interface1_ = nullptr;
 
   HMODULE library_d3d12_ = nullptr;
   PFN_D3D12_GET_DEBUG_INTERFACE pfn_d3d12_get_debug_interface_;
@@ -171,9 +174,9 @@ class D3D12Provider : public GraphicsProvider {
   DxcCreateInstanceProc pfn_dxcompiler_dxc_create_instance_ = nullptr;
 
   IDXGIFactory2* dxgi_factory_ = nullptr;
-  IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
   ID3D12Device* device_ = nullptr;
   ID3D12CommandQueue* direct_queue_ = nullptr;
+  IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
 
   uint32_t descriptor_sizes_[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
 

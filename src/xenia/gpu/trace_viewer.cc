@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -13,10 +13,12 @@
 
 #include "third_party/half/include/half.hpp"
 #include "third_party/imgui/imgui.h"
+#include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string.h"
+#include "xenia/base/system.h"
 #include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -28,7 +30,12 @@
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/immediate_drawer.h"
+#include "xenia/ui/presenter.h"
+#include "xenia/ui/ui_event.h"
+#include "xenia/ui/virtual_key.h"
 #include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
 #include "xenia/xbox.h"
 
 DEFINE_path(target_trace_file, "", "Specifies the trace file to load.", "GPU");
@@ -45,22 +52,17 @@ static const ImVec4 kColorComment =
 static const ImVec4 kColorIgnored =
     ImVec4(100 / 255.0f, 100 / 255.0f, 100 / 255.0f, 255 / 255.0f);
 
-TraceViewer::TraceViewer() = default;
+TraceViewer::TraceViewer(xe::ui::WindowedAppContext& app_context,
+                         const std::string_view name)
+    : xe::ui::WindowedApp(app_context, name, "some.trace"),
+      window_listener_(*this) {
+  AddPositionalOption("target_trace_file");
+}
 
 TraceViewer::~TraceViewer() = default;
 
-int TraceViewer::Main(const std::vector<std::string>& args) {
-  // Grab path from the flag or unnamed argument.
-  std::filesystem::path path;
-  if (!cvars::target_trace_file.empty()) {
-    // Passed as a named argument.
-    // TODO(benvanik): find something better than gflags that supports
-    // unicode.
-    path = cvars::target_trace_file;
-  } else if (args.size() >= 2) {
-    // Passed as an unnamed argument.
-    path = xe::to_path(args[1]);
-  }
+bool TraceViewer::OnInitialize() {
+  std::filesystem::path path = cvars::target_trace_file;
 
   // If no path passed, ask the user.
   if (path.empty()) {
@@ -82,49 +84,49 @@ int TraceViewer::Main(const std::vector<std::string>& args) {
   }
 
   if (path.empty()) {
-    xe::FatalError("No trace file specified");
-    return 1;
+    xe::ShowSimpleMessageBox(xe::SimpleMessageBoxType::Warning,
+                             "No trace file specified");
+    return false;
   }
 
   // Normalize the path and make absolute.
   auto abs_path = std::filesystem::absolute(path);
 
   if (!Setup()) {
-    xe::FatalError("Unable to setup trace viewer");
-    return 1;
+    xe::ShowSimpleMessageBox(xe::SimpleMessageBoxType::Error,
+                             "Unable to setup trace viewer");
+    return false;
   }
   if (!Load(std::move(abs_path))) {
-    xe::FatalError("Unable to load trace file; not found?");
-    return 1;
+    xe::ShowSimpleMessageBox(xe::SimpleMessageBoxType::Error,
+                             "Unable to load trace file; not found?");
+    return false;
   }
-  Run();
-  return 0;
+  return true;
 }
 
 bool TraceViewer::Setup() {
+  enum : size_t {
+    kZOrderImGui,
+    kZOrderTraceViewerInput,
+  };
+
   // Main display window.
-  loop_ = ui::Loop::Create();
-  window_ = xe::ui::Window::Create(loop_.get(), "xenia-gpu-trace-viewer");
-  loop_->PostSynchronous([&]() {
-    xe::threading::set_name("Win32 Loop");
-    if (!window_->Initialize()) {
-      xe::FatalError("Failed to initialize main window");
-      return;
-    }
-  });
-  window_->on_closed.AddListener([&](xe::ui::UIEvent* e) {
-    loop_->Quit();
-    XELOGI("User-initiated death!");
-    exit(1);
-  });
-  loop_->on_quit.AddListener([&](xe::ui::UIEvent* e) { window_.reset(); });
-  window_->Resize(1920, 1200);
+  assert_true(app_context().IsInUIThread());
+  window_ = xe::ui::Window::Create(app_context(), "xenia-gpu-trace-viewer",
+                                   1920, 1200);
+  window_->AddListener(&window_listener_);
+  window_->AddInputListener(&window_listener_, kZOrderTraceViewerInput);
+  if (!window_->Open()) {
+    XELOGE("Failed to open the main window");
+    return false;
+  }
 
   // Create the emulator but don't initialize so we can setup the window.
   emulator_ = std::make_unique<Emulator>("", "", "", "");
   X_STATUS result = emulator_->Setup(
-      window_.get(), nullptr, [this]() { return CreateGraphicsSystem(); },
-      nullptr);
+      window_.get(), nullptr, nullptr,
+      [this]() { return CreateGraphicsSystem(); }, nullptr);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
     return false;
@@ -132,31 +134,55 @@ bool TraceViewer::Setup() {
   memory_ = emulator_->memory();
   graphics_system_ = emulator_->graphics_system();
 
-  window_->set_imgui_input_enabled(true);
+  player_ = std::make_unique<TracePlayer>(graphics_system_);
+  player_->SetPresentLastCopy(true);
 
-  window_->on_key_char.AddListener([&](xe::ui::KeyEvent* e) {
-    if (e->key_code() == 0x74 /* VK_F5 */) {
-      graphics_system_->ClearCaches();
-      e->set_handled(true);
-    }
-  });
-
-  player_ = std::make_unique<TracePlayer>(loop_.get(), graphics_system_);
-
-  window_->on_painting.AddListener([&](xe::ui::UIEvent* e) {
-    DrawUI();
-
-    // Continuous paint.
-    window_->Invalidate();
-  });
-  window_->Invalidate();
+  // Setup drawing to the window.
+  xe::ui::GraphicsProvider& graphics_provider = *graphics_system_->provider();
+  presenter_ = graphics_provider.CreatePresenter();
+  if (!presenter_) {
+    XELOGE("Failed to initialize the presenter");
+    return false;
+  }
+  immediate_drawer_ = graphics_provider.CreateImmediateDrawer();
+  if (!immediate_drawer_) {
+    XELOGE("Failed to initialize the immediate drawer");
+    return false;
+  }
+  immediate_drawer_->SetPresenter(presenter_.get());
+  imgui_drawer_ =
+      std::make_unique<xe::ui::ImGuiDrawer>(window_.get(), kZOrderImGui);
+  imgui_drawer_->SetPresenterAndImmediateDrawer(presenter_.get(),
+                                                immediate_drawer_.get());
+  trace_viewer_dialog_ = std::unique_ptr<TraceViewerDialog>(
+      new TraceViewerDialog(imgui_drawer_.get(), *this));
+  window_->SetPresenter(presenter_.get());
 
   return true;
 }
 
+void TraceViewer::TraceViewerWindowListener::OnClosing(xe::ui::UIEvent& e) {
+  trace_viewer_.app_context().QuitFromUIThread();
+}
+
+void TraceViewer::TraceViewerWindowListener::OnKeyDown(xe::ui::KeyEvent& e) {
+  switch (e.virtual_key()) {
+    case xe::ui::VirtualKey::kF5:
+      trace_viewer_.graphics_system_->ClearCaches();
+      break;
+    default:
+      return;
+  }
+  e.set_handled(true);
+}
+
+void TraceViewer::TraceViewerDialog::OnDraw(ImGuiIO& io) {
+  trace_viewer_.DrawUI();
+}
+
 bool TraceViewer::Load(const std::filesystem::path& trace_file_path) {
   auto file_name = trace_file_path.filename();
-  window_->set_title("Xenia GPU Trace Viewer: " + xe::path_to_utf8(file_name));
+  window_->SetTitle("Xenia GPU Trace Viewer: " + xe::path_to_utf8(file_name));
 
   if (!player_->Open(trace_file_path)) {
     XELOGE("Could not load trace file");
@@ -164,16 +190,6 @@ bool TraceViewer::Load(const std::filesystem::path& trace_file_path) {
   }
 
   return true;
-}
-
-void TraceViewer::Run() {
-  // Wait until we are exited.
-  loop_->AwaitQuit();
-
-  player_.reset();
-  emulator_.reset();
-  window_.reset();
-  loop_.reset();
 }
 
 void TraceViewer::DrawMultilineString(const std::string_view str) {
@@ -250,8 +266,9 @@ void TraceViewer::DrawControllerUI() {
 
 void TraceViewer::DrawPacketDisassemblerUI() {
   ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowPos(ImVec2(float(window_->width()) - 500 - 5, 5),
-                          ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(
+      ImVec2(float(window_->GetActualLogicalWidth()) - 500 - 5, 5),
+      ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(500, 300));
   if (!ImGui::Begin("Packet Disassembler", nullptr)) {
     ImGui::End();
@@ -1031,7 +1048,7 @@ void ProgressBar(float frac, float width, float height = 0,
   if (height == 0) {
     height = ImGui::GetTextLineHeightWithSpacing();
   }
-  frac = xe::saturate(frac);
+  frac = xe::saturate_unsigned(frac);
 
   const auto fontAtlas = ImGui::GetIO().Fonts;
 
@@ -1069,8 +1086,9 @@ void TraceViewer::DrawStateUI() {
   auto command_processor = graphics_system_->command_processor();
   auto& regs = *graphics_system_->register_file();
 
-  ImGui::SetNextWindowPos(ImVec2(float(window_->width()) - 500 - 5, 30),
-                          ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(
+      ImVec2(float(window_->GetActualLogicalWidth()) - 500 - 5, 30),
+      ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(500, 680));
   if (!ImGui::Begin("State", nullptr)) {
     ImGui::End();

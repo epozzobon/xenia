@@ -12,14 +12,14 @@ project("xenia-ui-vulkan")
     "xenia-ui",
     "xenia-ui-spirv",
   })
-  defines({
-  })
   includedirs({
-    project_root.."/third_party/vulkan/",
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   local_platform_files()
+  local_platform_files("functions")
   files({
-    "shaders/bin/*.h",
+    "../shaders/bytecode/vulkan_spirv/*.h",
+    "shaders/bytecode/vulkan_spirv/*.h",
   })
   removefiles({"*_demo.cc"})
 
@@ -31,21 +31,18 @@ project("xenia-ui-window-vulkan-demo")
   links({
     "fmt",
     "imgui",
-    "volk",
     "xenia-base",
     "xenia-ui",
     "xenia-ui-spirv",
     "xenia-ui-vulkan",
   })
-  defines({
-  })
   includedirs({
-    project_root.."/third_party/vulkan/",
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   files({
     "../window_demo.cc",
     "vulkan_window_demo.cc",
-    project_root.."/src/xenia/base/main_"..platform_suffix..".cc",
+    project_root.."/src/xenia/ui/windowed_app_main_"..platform_suffix..".cc",
   })
   resincludedirs({
     project_root,
@@ -56,6 +53,4 @@ project("xenia-ui-window-vulkan-demo")
       "X11",
       "xcb",
       "X11-xcb",
-      "GL",
-      "vulkan",
     })

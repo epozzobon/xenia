@@ -13,7 +13,7 @@
 #include <memory>
 
 #include "xenia/base/assert.h"
-#include "xenia/ui/vulkan/vulkan.h"
+#include "xenia/ui/vulkan/vulkan_provider.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 namespace xe {
@@ -28,7 +28,7 @@ namespace vulkan {
 template <typename T, typename HANDLE>
 class BaseFencedPool {
  public:
-  BaseFencedPool(VkDevice device) : device_(device) {}
+  BaseFencedPool(const VulkanProvider& provider) : provider_(provider) {}
 
   virtual ~BaseFencedPool() {
     // TODO(benvanik): wait on fence until done.
@@ -47,11 +47,13 @@ class BaseFencedPool {
   // Checks all pending batches for completion and scavenges their entries.
   // This should be called as frequently as reasonable.
   void Scavenge() {
+    const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+    VkDevice device = provider_.device();
     while (pending_batch_list_head_) {
       auto batch = pending_batch_list_head_;
       assert_not_null(batch->fence);
 
-      VkResult status = vkGetFenceStatus(device_, batch->fence);
+      VkResult status = dfn.vkGetFenceStatus(device, batch->fence);
       if (status == VK_SUCCESS || status == VK_ERROR_DEVICE_LOST) {
         // Batch has completed. Reclaim.
         pending_batch_list_head_ = batch->next;
@@ -80,6 +82,8 @@ class BaseFencedPool {
   VkFence BeginBatch(VkFence fence = nullptr) {
     assert_null(open_batch_);
     Batch* batch = nullptr;
+    const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+    VkDevice device = provider_.device();
     if (free_batch_list_head_) {
       // Reuse a batch.
       batch = free_batch_list_head_;
@@ -88,10 +92,10 @@ class BaseFencedPool {
 
       if (batch->flags & kBatchOwnsFence && !fence) {
         // Reset owned fence.
-        vkResetFences(device_, 1, &batch->fence);
+        dfn.vkResetFences(device, 1, &batch->fence);
       } else if ((batch->flags & kBatchOwnsFence) && fence) {
         // Transfer owned -> external
-        vkDestroyFence(device_, batch->fence, nullptr);
+        dfn.vkDestroyFence(device, batch->fence, nullptr);
         batch->fence = fence;
         batch->flags &= ~kBatchOwnsFence;
       } else if (!(batch->flags & kBatchOwnsFence) && !fence) {
@@ -100,7 +104,7 @@ class BaseFencedPool {
         info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         info.pNext = nullptr;
         info.flags = 0;
-        VkResult res = vkCreateFence(device_, &info, nullptr, &batch->fence);
+        VkResult res = dfn.vkCreateFence(device, &info, nullptr, &batch->fence);
         if (res != VK_SUCCESS) {
           assert_always();
         }
@@ -121,7 +125,7 @@ class BaseFencedPool {
         info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         info.pNext = nullptr;
         info.flags = 0;
-        VkResult res = vkCreateFence(device_, &info, nullptr, &batch->fence);
+        VkResult res = dfn.vkCreateFence(device, &info, nullptr, &batch->fence);
         if (res != VK_SUCCESS) {
           assert_always();
         }
@@ -239,13 +243,15 @@ class BaseFencedPool {
   }
 
   void FreeAllEntries() {
+    const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+    VkDevice device = provider_.device();
     // Run down free lists.
     while (free_batch_list_head_) {
       auto batch = free_batch_list_head_;
       free_batch_list_head_ = batch->next;
 
       if (batch->flags & kBatchOwnsFence) {
-        vkDestroyFence(device_, batch->fence, nullptr);
+        dfn.vkDestroyFence(device, batch->fence, nullptr);
         batch->fence = nullptr;
       }
       delete batch;
@@ -258,7 +264,7 @@ class BaseFencedPool {
     }
   }
 
-  VkDevice device_ = nullptr;
+  const VulkanProvider& provider_;
 
  private:
   struct Entry {
@@ -288,7 +294,8 @@ class CommandBufferPool
  public:
   typedef BaseFencedPool<CommandBufferPool, VkCommandBuffer> Base;
 
-  CommandBufferPool(VkDevice device, uint32_t queue_family_index);
+  CommandBufferPool(const VulkanProvider& provider,
+                    uint32_t queue_family_index);
   ~CommandBufferPool() override;
 
   VkCommandBuffer AcquireEntry(
@@ -308,7 +315,7 @@ class DescriptorPool : public BaseFencedPool<DescriptorPool, VkDescriptorSet> {
  public:
   typedef BaseFencedPool<DescriptorPool, VkDescriptorSet> Base;
 
-  DescriptorPool(VkDevice device, uint32_t max_count,
+  DescriptorPool(const VulkanProvider& provider, uint32_t max_count,
                  std::vector<VkDescriptorPoolSize> pool_sizes);
   ~DescriptorPool() override;
 

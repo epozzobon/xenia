@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -36,6 +36,8 @@
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/registers.h"
+#include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 
 DEFINE_bool(d3d12_dxbc_disasm, false,
@@ -61,19 +63,22 @@ namespace xe {
 namespace gpu {
 namespace d3d12 {
 
-// Generated with `xb buildhlsl`.
-#include "xenia/gpu/d3d12/shaders/dxbc/adaptive_quad_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/adaptive_triangle_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/continuous_quad_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/continuous_triangle_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/discrete_quad_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/discrete_triangle_hs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/float24_round_ps.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/float24_truncate_ps.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/primitive_point_list_gs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/primitive_quad_list_gs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/primitive_rectangle_list_gs.h"
-#include "xenia/gpu/d3d12/shaders/dxbc/tessellation_vs.h"
+// Generated with `xb buildshaders`.
+namespace shaders {
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/adaptive_quad_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/adaptive_triangle_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_quad_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_triangle_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_quad_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_triangle_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/float24_round_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/float24_truncate_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/primitive_point_list_gs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/primitive_quad_list_gs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/primitive_rectangle_list_gs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/tessellation_adaptive_vs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/tessellation_indexed_vs.h"
+}  // namespace shaders
 
 PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
                              const RegisterFile& register_file,
@@ -83,7 +88,8 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
       register_file_(register_file),
       render_target_cache_(render_target_cache),
       bindless_resources_used_(bindless_resources_used) {
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
 
   bool edram_rov_used = render_target_cache.GetPath() ==
                         RenderTargetCache::Path::kPixelShaderInterlock;
@@ -92,7 +98,8 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
       provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
       render_target_cache_.gamma_render_target_as_srgb(),
       render_target_cache_.msaa_2x_supported(),
-      render_target_cache_.GetResolutionScale(),
+      render_target_cache_.GetResolutionScaleX(),
+      render_target_cache_.GetResolutionScaleY(),
       provider.GetGraphicsAnalysis() != nullptr);
 
   if (edram_rov_used) {
@@ -104,7 +111,8 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
 PipelineCache::~PipelineCache() { Shutdown(); }
 
 bool PipelineCache::Initialize() {
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
 
   // Initialize the command processor thread DXIL objects.
   dxbc_converter_ = nullptr;
@@ -142,6 +150,7 @@ bool PipelineCache::Initialize() {
   creation_threads_busy_ = 0;
   creation_completion_event_ =
       xe::threading::Event::CreateManualResetEvent(true);
+  assert_not_null(creation_completion_event_);
   creation_completion_set_event_ = false;
   creation_threads_shutdown_from_ = SIZE_MAX;
   if (cvars::d3d12_pipeline_creation_threads != 0) {
@@ -157,6 +166,7 @@ bool PipelineCache::Initialize() {
     for (size_t i = 0; i < creation_thread_count; ++i) {
       std::unique_ptr<xe::threading::Thread> creation_thread =
           xe::threading::Thread::Create({}, [this, i]() { CreationThread(i); });
+      assert_not_null(creation_thread);
       creation_thread->set_name("D3D12 Pipelines");
       creation_threads_.push_back(std::move(creation_thread));
     }
@@ -409,13 +419,15 @@ void PipelineCache::InitializeShaderStorage(
     std::mutex shaders_failed_to_translate_mutex;
     std::vector<D3D12Shader::D3D12Translation*> shaders_failed_to_translate;
     auto shader_translation_thread_function = [&]() {
-      auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+      const ui::d3d12::D3D12Provider& provider =
+          command_processor_.GetD3D12Provider();
       StringBuffer ucode_disasm_buffer;
       DxbcShaderTranslator translator(
           provider.GetAdapterVendorID(), bindless_resources_used_,
           edram_rov_used, render_target_cache_.gamma_render_target_as_srgb(),
           render_target_cache_.msaa_2x_supported(),
-          render_target_cache_.GetResolutionScale(),
+          render_target_cache_.GetResolutionScaleX(),
+          render_target_cache_.GetResolutionScaleY(),
           provider.GetGraphicsAnalysis() != nullptr);
       // If needed and possible, create objects needed for DXIL conversion and
       // disassembly on this thread.
@@ -531,9 +543,11 @@ void PipelineCache::InitializeShaderStorage(
       }
       while (shader_translation_threads.size() <
              shader_translation_threads_needed) {
-        shader_translation_threads.push_back(xe::threading::Thread::Create(
-            {}, shader_translation_thread_function));
-        shader_translation_threads.back()->set_name("Shader Translation");
+        auto thread = xe::threading::Thread::Create(
+            {}, shader_translation_thread_function);
+        assert_not_null(thread);
+        thread->set_name("Shader Translation");
+        shader_translation_threads.push_back(std::move(thread));
       }
       // Request ucode information gathering and translation of all the needed
       // shaders.
@@ -597,6 +611,7 @@ void PipelineCache::InitializeShaderStorage(
           xe::threading::Thread::Create({}, [this, creation_thread_index]() {
             CreationThread(creation_thread_index);
           });
+      assert_not_null(creation_thread);
       creation_thread->set_name("D3D12 Pipelines");
       creation_threads_.push_back(std::move(creation_thread));
     }
@@ -694,37 +709,39 @@ void PipelineCache::InitializeShaderStorage(
       ++pipelines_created;
     }
 
-    CreateQueuedPipelinesOnProcessorThread();
-    if (creation_threads_.size() > creation_thread_original_count) {
-      {
-        std::lock_guard<std::mutex> lock(creation_request_lock_);
-        creation_threads_shutdown_from_ = creation_thread_original_count;
-        // Assuming the queue is empty because of
-        // CreateQueuedPipelinesOnProcessorThread.
-      }
-      creation_request_cond_.notify_all();
-      while (creation_threads_.size() > creation_thread_original_count) {
-        xe::threading::Wait(creation_threads_.back().get(), false);
-        creation_threads_.pop_back();
-      }
-      bool await_creation_completion_event;
-      {
-        // Cleanup so additional threads can be created later again.
-        std::lock_guard<std::mutex> lock(creation_request_lock_);
-        creation_threads_shutdown_from_ = SIZE_MAX;
-        // If the invocation is blocking, all the shader storage initialization
-        // is expected to be done before proceeding, to avoid latency in the
-        // command processor after the invocation.
-        await_creation_completion_event =
-            blocking && creation_threads_busy_ != 0;
-        if (await_creation_completion_event) {
-          creation_completion_event_->Reset();
-          creation_completion_set_event_ = true;
+    if (!creation_threads_.empty()) {
+      CreateQueuedPipelinesOnProcessorThread();
+      if (creation_threads_.size() > creation_thread_original_count) {
+        {
+          std::lock_guard<std::mutex> lock(creation_request_lock_);
+          creation_threads_shutdown_from_ = creation_thread_original_count;
+          // Assuming the queue is empty because of
+          // CreateQueuedPipelinesOnProcessorThread.
         }
-      }
-      if (await_creation_completion_event) {
-        creation_request_cond_.notify_one();
-        xe::threading::Wait(creation_completion_event_.get(), false);
+        creation_request_cond_.notify_all();
+        while (creation_threads_.size() > creation_thread_original_count) {
+          xe::threading::Wait(creation_threads_.back().get(), false);
+          creation_threads_.pop_back();
+        }
+        bool await_creation_completion_event;
+        {
+          // Cleanup so additional threads can be created later again.
+          std::lock_guard<std::mutex> lock(creation_request_lock_);
+          creation_threads_shutdown_from_ = SIZE_MAX;
+          // If the invocation is blocking, all the shader storage
+          // initialization is expected to be done before proceeding, to avoid
+          // latency in the command processor after the invocation.
+          await_creation_completion_event =
+              blocking && creation_threads_busy_ != 0;
+          if (await_creation_completion_event) {
+            creation_completion_event_->Reset();
+            creation_completion_set_event_ = true;
+          }
+        }
+        if (await_creation_completion_event) {
+          creation_request_cond_.notify_one();
+          xe::threading::Wait(creation_completion_event_.get(), false);
+        }
       }
     }
 
@@ -760,6 +777,8 @@ void PipelineCache::InitializeShaderStorage(
   storage_write_thread_shutdown_ = false;
   storage_write_thread_ =
       xe::threading::Thread::Create({}, [this]() { StorageWriteThread(); });
+  assert_not_null(storage_write_thread_);
+  storage_write_thread_->set_name("D3D12 Storage writer");
 }
 
 void PipelineCache::ShutdownShaderStorage() {
@@ -863,146 +882,69 @@ D3D12Shader* PipelineCache::LoadShader(xenos::ShaderType shader_type,
   return shader;
 }
 
-bool PipelineCache::GetCurrentShaderModification(
+DxbcShaderTranslator::Modification
+PipelineCache::GetCurrentVertexShaderModification(
     const Shader& shader,
-    DxbcShaderTranslator::Modification& modification_out) const {
+    Shader::HostVertexShaderType host_vertex_shader_type) const {
+  assert_true(shader.type() == xenos::ShaderType::kVertex);
   assert_true(shader.is_ucode_analyzed());
   const auto& regs = register_file_;
   auto sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
-  if (shader.type() == xenos::ShaderType::kVertex) {
-    Shader::HostVertexShaderType host_vertex_shader_type =
-        GetCurrentHostVertexShaderTypeIfValid();
-    if (host_vertex_shader_type == Shader::HostVertexShaderType(-1)) {
-      return false;
-    }
-    modification_out = DxbcShaderTranslator::Modification(
-        shader_translator_->GetDefaultVertexShaderModification(
-            shader.GetDynamicAddressableRegisterCount(
-                sq_program_cntl.vs_num_reg),
-            host_vertex_shader_type));
-  } else {
-    assert_true(shader.type() == xenos::ShaderType::kPixel);
-    DxbcShaderTranslator::Modification pixel_shader_modification(
-        shader_translator_->GetDefaultPixelShaderModification(
-            shader.GetDynamicAddressableRegisterCount(
-                sq_program_cntl.ps_num_reg)));
-    if (render_target_cache_.GetPath() ==
-        RenderTargetCache::Path::kHostRenderTargets) {
-      using DepthStencilMode =
-          DxbcShaderTranslator::Modification::DepthStencilMode;
-      RenderTargetCache::DepthFloat24Conversion depth_float24_conversion =
-          render_target_cache_.depth_float24_conversion();
-      if ((depth_float24_conversion ==
-               RenderTargetCache::DepthFloat24Conversion::kOnOutputTruncating ||
-           depth_float24_conversion ==
-               RenderTargetCache::DepthFloat24Conversion::kOnOutputRounding) &&
-          draw_util::GetDepthControlForCurrentEdramMode(regs).z_enable &&
-          regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
-              xenos::DepthRenderTargetFormat::kD24FS8) {
-        pixel_shader_modification.pixel.depth_stencil_mode =
-            depth_float24_conversion ==
-                    RenderTargetCache::DepthFloat24Conversion::
-                        kOnOutputTruncating
-                ? DepthStencilMode::kFloat24Truncating
-                : DepthStencilMode::kFloat24Rounding;
-      } else {
-        if (shader.implicit_early_z_write_allowed() &&
-            (!shader.writes_color_target(0) ||
-             !draw_util::DoesCoverageDependOnAlpha(
-                 regs.Get<reg::RB_COLORCONTROL>()))) {
-          pixel_shader_modification.pixel.depth_stencil_mode =
-              DepthStencilMode::kEarlyHint;
-        } else {
-          pixel_shader_modification.pixel.depth_stencil_mode =
-              DepthStencilMode::kNoModifiers;
-        }
-      }
-    }
-    modification_out = pixel_shader_modification;
-  }
-  return true;
+  return DxbcShaderTranslator::Modification(
+      shader_translator_->GetDefaultVertexShaderModification(
+          shader.GetDynamicAddressableRegisterCount(sq_program_cntl.vs_num_reg),
+          host_vertex_shader_type));
 }
 
-Shader::HostVertexShaderType
-PipelineCache::GetCurrentHostVertexShaderTypeIfValid() const {
-  // If the values this functions returns are changed, INVALIDATE THE SHADER
-  // STORAGE (increase kVersion for BOTH shaders and pipelines)! The exception
-  // is when the function originally returned "unsupported", but started to
-  // return a valid value (in this case the shader wouldn't be cached in the
-  // first place). Otherwise games will not be able to locate shaders for draws
-  // for which the host vertex shader type has changed!
+DxbcShaderTranslator::Modification
+PipelineCache::GetCurrentPixelShaderModification(
+    const Shader& shader, reg::RB_DEPTHCONTROL normalized_depth_control) const {
+  assert_true(shader.type() == xenos::ShaderType::kPixel);
+  assert_true(shader.is_ucode_analyzed());
   const auto& regs = register_file_;
-  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
-  if (!xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
-                                  vgt_draw_initiator.prim_type)) {
-    // VGT_OUTPUT_PATH_CNTL and HOS registers are ignored in implicit major
-    // mode.
-    return Shader::HostVertexShaderType::kVertex;
-  }
-  if (regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select !=
-      xenos::VGTOutputPath::kTessellationEnable) {
-    return Shader::HostVertexShaderType::kVertex;
-  }
-  xenos::TessellationMode tessellation_mode =
-      regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
-  switch (vgt_draw_initiator.prim_type) {
-    case xenos::PrimitiveType::kTriangleList:
-      // Also supported by triangle strips and fans according to:
-      // https://www.khronos.org/registry/OpenGL/extensions/AMD/AMD_vertex_shader_tessellator.txt
-      // Would need to convert those to triangle lists, but haven't seen any
-      // games using tessellated strips/fans so far.
-      switch (tessellation_mode) {
-        case xenos::TessellationMode::kDiscrete:
-          // - Call of Duty 3 - nets above barrels in the beginning of the
-          //   first mission (turn right after the end of the intro) -
-          //   kTriangleList.
-        case xenos::TessellationMode::kContinuous:
-          // - Viva Pinata - tree building with a beehive in the beginning
-          //   (visible on the start screen behind the logo), waterfall in the
-          //   beginning - kTriangleList.
-          return Shader::HostVertexShaderType::kTriangleDomainCPIndexed;
-        default:
-          break;
+  auto sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
+  DxbcShaderTranslator::Modification modification(
+      shader_translator_->GetDefaultPixelShaderModification(
+          shader.GetDynamicAddressableRegisterCount(
+              sq_program_cntl.ps_num_reg)));
+  if (render_target_cache_.GetPath() ==
+      RenderTargetCache::Path::kHostRenderTargets) {
+    using DepthStencilMode =
+        DxbcShaderTranslator::Modification::DepthStencilMode;
+    RenderTargetCache::DepthFloat24Conversion depth_float24_conversion =
+        render_target_cache_.depth_float24_conversion();
+    if ((depth_float24_conversion ==
+             RenderTargetCache::DepthFloat24Conversion::kOnOutputTruncating ||
+         depth_float24_conversion ==
+             RenderTargetCache::DepthFloat24Conversion::kOnOutputRounding) &&
+        normalized_depth_control.z_enable &&
+        regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
+            xenos::DepthRenderTargetFormat::kD24FS8) {
+      modification.pixel.depth_stencil_mode =
+          depth_float24_conversion ==
+                  RenderTargetCache::DepthFloat24Conversion::kOnOutputTruncating
+              ? DepthStencilMode::kFloat24Truncating
+              : DepthStencilMode::kFloat24Rounding;
+    } else {
+      if (shader.implicit_early_z_write_allowed() &&
+          (!shader.writes_color_target(0) ||
+           !draw_util::DoesCoverageDependOnAlpha(
+               regs.Get<reg::RB_COLORCONTROL>()))) {
+        modification.pixel.depth_stencil_mode = DepthStencilMode::kEarlyHint;
+      } else {
+        modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
       }
-      break;
-    case xenos::PrimitiveType::kQuadList:
-      switch (tessellation_mode) {
-        // Also supported by quad strips according to:
-        // https://www.khronos.org/registry/OpenGL/extensions/AMD/AMD_vertex_shader_tessellator.txt
-        // Would need to convert those to quad lists, but haven't seen any games
-        // using tessellated strips so far.
-        case xenos::TessellationMode::kDiscrete:
-          // Not seen in games so far.
-        case xenos::TessellationMode::kContinuous:
-          // - Defender - retro screen and beams in the main menu - kQuadList.
-          return Shader::HostVertexShaderType::kQuadDomainCPIndexed;
-        default:
-          break;
-      }
-      break;
-    case xenos::PrimitiveType::kTrianglePatch:
-      // - Banjo-Kazooie: Nuts & Bolts - water - adaptive.
-      // - Halo 3 - water - adaptive.
-      return Shader::HostVertexShaderType::kTriangleDomainPatchIndexed;
-    case xenos::PrimitiveType::kQuadPatch:
-      // - Fable II - continuous.
-      // - Viva Pinata - garden ground - adaptive.
-      return Shader::HostVertexShaderType::kQuadDomainPatchIndexed;
-    default:
-      // TODO(Triang3l): Support line patches.
-      break;
+    }
   }
-  XELOGE(
-      "Unsupported tessellation mode {} for primitive type {}. Report the game "
-      "to Xenia developers!",
-      uint32_t(tessellation_mode), uint32_t(vgt_draw_initiator.prim_type));
-  return Shader::HostVertexShaderType(-1);
+  return modification;
 }
 
 bool PipelineCache::ConfigurePipeline(
     D3D12Shader::D3D12Translation* vertex_shader,
     D3D12Shader::D3D12Translation* pixel_shader,
-    xenos::PrimitiveType primitive_type, xenos::IndexFormat index_format,
+    const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+    reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask,
     uint32_t bound_depth_and_color_render_target_bits,
     const uint32_t* bound_depth_and_color_render_target_formats,
     void** pipeline_handle_out, ID3D12RootSignature** root_signature_out) {
@@ -1073,7 +1015,8 @@ bool PipelineCache::ConfigurePipeline(
 
   PipelineRuntimeDescription runtime_description;
   if (!GetCurrentStateDescription(
-          vertex_shader, pixel_shader, primitive_type, index_format,
+          vertex_shader, pixel_shader, primitive_processing_result,
+          normalized_depth_control, normalized_color_mask,
           bound_depth_and_color_render_target_bits,
           bound_depth_and_color_render_target_formats, runtime_description)) {
     return false;
@@ -1315,7 +1258,8 @@ bool PipelineCache::TranslateAnalyzedShader(
   }
 
   // Disassemble the shader for dumping.
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
   if (cvars::d3d12_dxbc_disasm_dxilconv) {
     translation.DisassembleDxbcAndDxil(provider, cvars::d3d12_dxbc_disasm,
                                        dxbc_converter, dxc_utils, dxc_compiler);
@@ -1339,7 +1283,9 @@ bool PipelineCache::TranslateAnalyzedShader(
 bool PipelineCache::GetCurrentStateDescription(
     D3D12Shader::D3D12Translation* vertex_shader,
     D3D12Shader::D3D12Translation* pixel_shader,
-    xenos::PrimitiveType primitive_type, xenos::IndexFormat index_format,
+    const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+    reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask,
     uint32_t bound_depth_and_color_render_target_bits,
     const uint32_t* bound_depth_and_color_render_target_formats,
     PipelineRuntimeDescription& runtime_description_out) {
@@ -1356,12 +1302,11 @@ bool PipelineCache::GetCurrentStateDescription(
   // Initialize all unused fields to zero for comparison/hashing.
   std::memset(&runtime_description_out, 0, sizeof(runtime_description_out));
 
-  bool tessellated =
-      DxbcShaderTranslator::Modification(vertex_shader->modification())
-          .vertex.host_vertex_shader_type !=
-      Shader::HostVertexShaderType::kVertex;
-  bool primitive_polygonal =
-      xenos::IsPrimitivePolygonal(tessellated, primitive_type);
+  assert_true(DxbcShaderTranslator::Modification(vertex_shader->modification())
+                  .vertex.host_vertex_shader_type ==
+              primitive_processing_result.host_vertex_shader_type);
+  bool tessellated = primitive_processing_result.IsTessellated();
+  bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
   bool rasterization_enabled =
       draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
   // In Direct3D, rasterization (along with pixel counting) is disabled by
@@ -1396,12 +1341,12 @@ bool PipelineCache::GetCurrentStateDescription(
   description_out.vertex_shader_modification = vertex_shader->modification();
 
   // Index buffer strip cut value.
-  if (pa_su_sc_mode_cntl.multi_prim_ib_ena) {
-    // Not using 0xFFFF with 32-bit indices because in index buffers it will be
-    // 0xFFFF0000 anyway due to endianness.
-    description_out.strip_cut_index = index_format == xenos::IndexFormat::kInt32
-                                          ? PipelineStripCutIndex::kFFFFFFFF
-                                          : PipelineStripCutIndex::kFFFF;
+  if (primitive_processing_result.host_primitive_reset_enabled) {
+    description_out.strip_cut_index =
+        primitive_processing_result.host_index_format ==
+                xenos::IndexFormat::kInt16
+            ? PipelineStripCutIndex::kFFFF
+            : PipelineStripCutIndex::kFFFFFFFF;
   } else {
     description_out.strip_cut_index = PipelineStripCutIndex::kNone;
   }
@@ -1409,16 +1354,15 @@ bool PipelineCache::GetCurrentStateDescription(
   // Host vertex shader type and primitive topology.
   if (tessellated) {
     description_out.primitive_topology_type_or_tessellation_mode =
-        uint32_t(regs.Get<reg::VGT_HOS_CNTL>().tess_mode);
+        uint32_t(primitive_processing_result.tessellation_mode);
   } else {
-    switch (primitive_type) {
+    switch (primitive_processing_result.host_primitive_type) {
       case xenos::PrimitiveType::kPointList:
         description_out.primitive_topology_type_or_tessellation_mode =
             uint32_t(PipelinePrimitiveTopologyType::kPoint);
         break;
       case xenos::PrimitiveType::kLineList:
       case xenos::PrimitiveType::kLineStrip:
-      case xenos::PrimitiveType::kLineLoop:
       // Quads are emulated as line lists with adjacency.
       case xenos::PrimitiveType::kQuadList:
       case xenos::PrimitiveType::k2DLineStrip:
@@ -1430,7 +1374,7 @@ bool PipelineCache::GetCurrentStateDescription(
             uint32_t(PipelinePrimitiveTopologyType::kTriangle);
         break;
     }
-    switch (primitive_type) {
+    switch (primitive_processing_result.host_primitive_type) {
       case xenos::PrimitiveType::kPointList:
         description_out.geometry_shader = PipelineGeometryShader::kPointList;
         break;
@@ -1479,7 +1423,6 @@ bool PipelineCache::GetCurrentStateDescription(
   // rasterization will be disabled externally, or the draw call will be dropped
   // early if the vertex shader doesn't export to memory.
   bool cull_front, cull_back;
-  float poly_offset = 0.0f, poly_offset_scale = 0.0f;
   if (primitive_polygonal) {
     description_out.front_counter_clockwise = pa_su_sc_mode_cntl.face == 0;
     cull_front = pa_su_sc_mode_cntl.cull_front != 0;
@@ -1503,10 +1446,6 @@ bool PipelineCache::GetCurrentStateDescription(
           xenos::PolygonType::kTriangles) {
         description_out.fill_mode_wireframe = 1;
       }
-      if (!edram_rov_used && pa_su_sc_mode_cntl.poly_offset_front_enable) {
-        poly_offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
-        poly_offset_scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
-      }
     }
     if (!cull_back) {
       // Back faces aren't culled.
@@ -1514,54 +1453,31 @@ bool PipelineCache::GetCurrentStateDescription(
           xenos::PolygonType::kTriangles) {
         description_out.fill_mode_wireframe = 1;
       }
-      // Prefer front depth bias because in general, front faces are the ones
-      // that are rendered (except for shadow volumes).
-      if (!edram_rov_used && pa_su_sc_mode_cntl.poly_offset_back_enable &&
-          poly_offset == 0.0f && poly_offset_scale == 0.0f) {
-        poly_offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET].f32;
-        poly_offset_scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE].f32;
-      }
     }
-    if (pa_su_sc_mode_cntl.poly_mode == xenos::PolygonModeEnable::kDisabled) {
+    if (pa_su_sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDualMode) {
       description_out.fill_mode_wireframe = 0;
     }
   } else {
     // Filled front faces only, without culling.
     cull_front = false;
     cull_back = false;
-    if (!edram_rov_used && pa_su_sc_mode_cntl.poly_offset_para_enable) {
-      poly_offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
-      poly_offset_scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
-    }
   }
   if (!edram_rov_used) {
-    // Conversion based on the calculations in Call of Duty 4 and the values it
-    // writes to the registers, and also on:
-    // https://github.com/mesa3d/mesa/blob/54ad9b444c8e73da498211870e785239ad3ff1aa/src/gallium/drivers/radeonsi/si_state.c#L943
-    // Dividing the scale by 2 - Call of Duty 4 sets the constant bias of
-    // 1/32768 for decals, however, it's done in two steps in separate places:
-    // first it's divided by 65536, and then it's multiplied by 2 (which is
-    // consistent with what si_create_rs_state does, which multiplies the offset
-    // by 2 if it comes from a non-D3D9 API for 24-bit depth buffers) - and
-    // multiplying by 2 to the number of significand bits. Tested mostly in Call
-    // of Duty 4 (vehicledamage map explosion decals) and Red Dead Redemption
-    // (shadows - 2^17 is not enough, 2^18 hasn't been tested, but 2^19
-    // eliminates the acne).
-    if (regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
-        xenos::DepthRenderTargetFormat::kD24FS8) {
-      poly_offset *= float(1 << 19);
-    } else {
-      poly_offset *= float(1 << 23);
-    }
+    float polygon_offset, polygon_offset_scale;
+    draw_util::GetPreferredFacePolygonOffset(
+        regs, primitive_polygonal, polygon_offset_scale, polygon_offset);
+    float polygon_offset_host_scale = draw_util::GetD3D10PolygonOffsetFactor(
+        regs.Get<reg::RB_DEPTH_INFO>().depth_format, true);
     // Using ceil here just in case a game wants the offset but passes a value
     // that is too small - it's better to apply more offset than to make depth
     // fighting worse or to disable the offset completely (Direct3D 12 takes an
     // integer value).
-    description_out.depth_bias = int32_t(std::ceil(std::abs(poly_offset))) *
-                                 (poly_offset < 0.0f ? -1 : 1);
-    // "slope computed in subpixels (1/12 or 1/16)" - R5xx Acceleration.
+    description_out.depth_bias =
+        int32_t(
+            std::ceil(std::abs(polygon_offset * polygon_offset_host_scale))) *
+        (polygon_offset < 0.0f ? -1 : 1);
     description_out.depth_bias_slope_scaled =
-        poly_offset_scale * (1.0f / 16.0f);
+        polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit;
   }
   if (tessellated && cvars::d3d12_tessellation_wireframe) {
     description_out.fill_mode_wireframe = 1;
@@ -1572,18 +1488,16 @@ bool PipelineCache::GetCurrentStateDescription(
     // Depth/stencil. No stencil, always passing depth test and no depth writing
     // means depth disabled.
     if (bound_depth_and_color_render_target_bits & 1) {
-      auto rb_depthcontrol =
-          draw_util::GetDepthControlForCurrentEdramMode(regs);
-      if (rb_depthcontrol.z_enable) {
-        description_out.depth_func = rb_depthcontrol.zfunc;
-        description_out.depth_write = rb_depthcontrol.z_write_enable;
+      if (normalized_depth_control.z_enable) {
+        description_out.depth_func = normalized_depth_control.zfunc;
+        description_out.depth_write = normalized_depth_control.z_write_enable;
       } else {
         description_out.depth_func = xenos::CompareFunction::kAlways;
       }
-      if (rb_depthcontrol.stencil_enable) {
+      if (normalized_depth_control.stencil_enable) {
         description_out.stencil_enable = 1;
         bool stencil_backface_enable =
-            primitive_polygonal && rb_depthcontrol.backface_enable;
+            primitive_polygonal && normalized_depth_control.backface_enable;
         // Per-face masks not supported by Direct3D 12, choose the back face
         // ones only if drawing only back faces.
         Register stencil_ref_mask_reg;
@@ -1596,18 +1510,23 @@ bool PipelineCache::GetCurrentStateDescription(
             regs.Get<reg::RB_STENCILREFMASK>(stencil_ref_mask_reg);
         description_out.stencil_read_mask = stencil_ref_mask.stencilmask;
         description_out.stencil_write_mask = stencil_ref_mask.stencilwritemask;
-        description_out.stencil_front_fail_op = rb_depthcontrol.stencilfail;
+        description_out.stencil_front_fail_op =
+            normalized_depth_control.stencilfail;
         description_out.stencil_front_depth_fail_op =
-            rb_depthcontrol.stencilzfail;
-        description_out.stencil_front_pass_op = rb_depthcontrol.stencilzpass;
-        description_out.stencil_front_func = rb_depthcontrol.stencilfunc;
+            normalized_depth_control.stencilzfail;
+        description_out.stencil_front_pass_op =
+            normalized_depth_control.stencilzpass;
+        description_out.stencil_front_func =
+            normalized_depth_control.stencilfunc;
         if (stencil_backface_enable) {
-          description_out.stencil_back_fail_op = rb_depthcontrol.stencilfail_bf;
+          description_out.stencil_back_fail_op =
+              normalized_depth_control.stencilfail_bf;
           description_out.stencil_back_depth_fail_op =
-              rb_depthcontrol.stencilzfail_bf;
+              normalized_depth_control.stencilzfail_bf;
           description_out.stencil_back_pass_op =
-              rb_depthcontrol.stencilzpass_bf;
-          description_out.stencil_back_func = rb_depthcontrol.stencilfunc_bf;
+              normalized_depth_control.stencilzpass_bf;
+          description_out.stencil_back_func =
+              normalized_depth_control.stencilfunc_bf;
         } else {
           description_out.stencil_back_fail_op =
               description_out.stencil_front_fail_op;
@@ -1632,10 +1551,6 @@ bool PipelineCache::GetCurrentStateDescription(
 
     // Render targets and blending state. 32 because of 0x1F mask, for safety
     // (all unknown to zero).
-    uint32_t color_mask =
-        pixel_shader ? command_processor_.GetCurrentColorMask(
-                           pixel_shader->shader().writes_color_targets())
-                     : 0;
     static const PipelineBlendFactor kBlendFactorMap[32] = {
         /*  0 */ PipelineBlendFactor::kZero,
         /*  1 */ PipelineBlendFactor::kOne,
@@ -1660,7 +1575,8 @@ bool PipelineCache::GetCurrentStateDescription(
         /* 16 */ PipelineBlendFactor::kSrcAlphaSat,
     };
     // Like kBlendFactorMap, but with color modes changed to alpha. Some
-    // pipelines aren't created in Prey because a color mode is used for alpha.
+    // pipelines aren't created in 545407E0 because a color mode is used for
+    // alpha.
     static const PipelineBlendFactor kBlendFactorAlphaMap[32] = {
         /*  0 */ PipelineBlendFactor::kZero,
         /*  1 */ PipelineBlendFactor::kOne,
@@ -1692,7 +1608,7 @@ bool PipelineCache::GetCurrentStateDescription(
     // have their sample count matching the one set in the pipeline - however if
     // we set NumRenderTargets to 0 and also disable depth / stencil, the sample
     // count must be set to 1 - while the command list may still have
-    // multisampled render targets bound (happens in Halo 3 main menu).
+    // multisampled render targets bound (happens in 4D5307E6 main menu).
     // TODO(Triang3l): Investigate interaction of OMSetRenderTargets with
     // non-null depth and DSVFormat DXGI_FORMAT_UNKNOWN in the same case.
     for (uint32_t i = 0; i < 4; ++i) {
@@ -1706,8 +1622,7 @@ bool PipelineCache::GetCurrentStateDescription(
           reg::RB_COLOR_INFO::rt_register_indices[i]);
       rt.format = xenos::ColorRenderTargetFormat(
           bound_depth_and_color_render_target_formats[1 + i]);
-      // TODO(Triang3l): Normalize unused bits of the color write mask.
-      rt.write_mask = (color_mask >> (i * 4)) & 0xF;
+      rt.write_mask = (normalized_color_mask >> (i * 4)) & 0xF;
       if (rt.write_mask) {
         auto blendcontrol = regs.Get<reg::RB_BLENDCONTROL>(
             reg::RB_BLENDCONTROL::rt_register_indices[i]);
@@ -1826,38 +1741,45 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     }
     switch (description.geometry_shader) {
       case PipelineGeometryShader::kPointList:
-        state_desc.GS.pShaderBytecode = primitive_point_list_gs;
-        state_desc.GS.BytecodeLength = sizeof(primitive_point_list_gs);
+        state_desc.GS.pShaderBytecode = shaders::primitive_point_list_gs;
+        state_desc.GS.BytecodeLength = sizeof(shaders::primitive_point_list_gs);
         break;
       case PipelineGeometryShader::kRectangleList:
-        state_desc.GS.pShaderBytecode = primitive_rectangle_list_gs;
-        state_desc.GS.BytecodeLength = sizeof(primitive_rectangle_list_gs);
+        state_desc.GS.pShaderBytecode = shaders::primitive_rectangle_list_gs;
+        state_desc.GS.BytecodeLength =
+            sizeof(shaders::primitive_rectangle_list_gs);
         break;
       case PipelineGeometryShader::kQuadList:
-        state_desc.GS.pShaderBytecode = primitive_quad_list_gs;
-        state_desc.GS.BytecodeLength = sizeof(primitive_quad_list_gs);
+        state_desc.GS.pShaderBytecode = shaders::primitive_quad_list_gs;
+        state_desc.GS.BytecodeLength = sizeof(shaders::primitive_quad_list_gs);
         break;
       default:
         break;
     }
   } else {
-    state_desc.VS.pShaderBytecode = tessellation_vs;
-    state_desc.VS.BytecodeLength = sizeof(tessellation_vs);
     state_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     xenos::TessellationMode tessellation_mode = xenos::TessellationMode(
         description.primitive_topology_type_or_tessellation_mode);
+    if (tessellation_mode == xenos::TessellationMode::kAdaptive) {
+      state_desc.VS.pShaderBytecode = shaders::tessellation_adaptive_vs;
+      state_desc.VS.BytecodeLength = sizeof(shaders::tessellation_adaptive_vs);
+    } else {
+      state_desc.VS.pShaderBytecode = shaders::tessellation_indexed_vs;
+      state_desc.VS.BytecodeLength = sizeof(shaders::tessellation_indexed_vs);
+    }
     switch (tessellation_mode) {
       case xenos::TessellationMode::kDiscrete:
         switch (host_vertex_shader_type) {
           case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
           case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = discrete_triangle_hs;
-            state_desc.HS.BytecodeLength = sizeof(discrete_triangle_hs);
+            state_desc.HS.pShaderBytecode = shaders::discrete_triangle_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::discrete_triangle_hs);
             break;
           case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
           case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = discrete_quad_hs;
-            state_desc.HS.BytecodeLength = sizeof(discrete_quad_hs);
+            state_desc.HS.pShaderBytecode = shaders::discrete_quad_hs;
+            state_desc.HS.BytecodeLength = sizeof(shaders::discrete_quad_hs);
             break;
           default:
             assert_unhandled_case(host_vertex_shader_type);
@@ -1868,13 +1790,14 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         switch (host_vertex_shader_type) {
           case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
           case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = continuous_triangle_hs;
-            state_desc.HS.BytecodeLength = sizeof(continuous_triangle_hs);
+            state_desc.HS.pShaderBytecode = shaders::continuous_triangle_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::continuous_triangle_hs);
             break;
           case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
           case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = continuous_quad_hs;
-            state_desc.HS.BytecodeLength = sizeof(continuous_quad_hs);
+            state_desc.HS.pShaderBytecode = shaders::continuous_quad_hs;
+            state_desc.HS.BytecodeLength = sizeof(shaders::continuous_quad_hs);
             break;
           default:
             assert_unhandled_case(host_vertex_shader_type);
@@ -1884,12 +1807,13 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       case xenos::TessellationMode::kAdaptive:
         switch (host_vertex_shader_type) {
           case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = adaptive_triangle_hs;
-            state_desc.HS.BytecodeLength = sizeof(adaptive_triangle_hs);
+            state_desc.HS.pShaderBytecode = shaders::adaptive_triangle_hs;
+            state_desc.HS.BytecodeLength =
+                sizeof(shaders::adaptive_triangle_hs);
             break;
           case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
-            state_desc.HS.pShaderBytecode = adaptive_quad_hs;
-            state_desc.HS.BytecodeLength = sizeof(adaptive_quad_hs);
+            state_desc.HS.pShaderBytecode = shaders::adaptive_quad_hs;
+            state_desc.HS.BytecodeLength = sizeof(shaders::adaptive_quad_hs);
             break;
           default:
             assert_unhandled_case(host_vertex_shader_type);
@@ -1927,12 +1851,12 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         description.depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
       switch (render_target_cache_.depth_float24_conversion()) {
         case RenderTargetCache::DepthFloat24Conversion::kOnOutputTruncating:
-          state_desc.PS.pShaderBytecode = float24_truncate_ps;
-          state_desc.PS.BytecodeLength = sizeof(float24_truncate_ps);
+          state_desc.PS.pShaderBytecode = shaders::float24_truncate_ps;
+          state_desc.PS.BytecodeLength = sizeof(shaders::float24_truncate_ps);
           break;
         case RenderTargetCache::DepthFloat24Conversion::kOnOutputRounding:
-          state_desc.PS.pShaderBytecode = float24_round_ps;
-          state_desc.PS.BytecodeLength = sizeof(float24_round_ps);
+          state_desc.PS.pShaderBytecode = shaders::float24_round_ps;
+          state_desc.PS.BytecodeLength = sizeof(shaders::float24_round_ps);
           break;
         default:
           break;
@@ -1962,9 +1886,14 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       description.front_counter_clockwise ? TRUE : FALSE;
   state_desc.RasterizerState.DepthBias = description.depth_bias;
   state_desc.RasterizerState.DepthBiasClamp = 0.0f;
+  // With non-square resolution scaling, make sure the worst-case impact is
+  // reverted (slope only along the scaled axis), thus max. More bias is better
+  // than less bias, because less bias means Z fighting with the background is
+  // more likely.
   state_desc.RasterizerState.SlopeScaledDepthBias =
       description.depth_bias_slope_scaled *
-      float(render_target_cache_.GetResolutionScale());
+      float(std::max(render_target_cache_.GetResolutionScaleX(),
+                     render_target_cache_.GetResolutionScaleY()));
   state_desc.RasterizerState.DepthClipEnable =
       description.depth_clip ? TRUE : FALSE;
   uint32_t msaa_sample_count = uint32_t(1)
@@ -2066,10 +1995,11 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         D3D12_BLEND_BLEND_FACTOR,  D3D12_BLEND_INV_BLEND_FACTOR,
         D3D12_BLEND_SRC_ALPHA_SAT,
     };
+    // 8 entries for safety since 3 bits from the guest are passed directly.
     static const D3D12_BLEND_OP kBlendOpMap[] = {
         D3D12_BLEND_OP_ADD, D3D12_BLEND_OP_SUBTRACT,     D3D12_BLEND_OP_MIN,
-        D3D12_BLEND_OP_MAX, D3D12_BLEND_OP_REV_SUBTRACT,
-    };
+        D3D12_BLEND_OP_MAX, D3D12_BLEND_OP_REV_SUBTRACT, D3D12_BLEND_OP_ADD,
+        D3D12_BLEND_OP_ADD, D3D12_BLEND_OP_ADD};
     for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
       const PipelineRenderTarget& rt = description.render_targets[i];
       if (!rt.used) {
@@ -2087,9 +2017,6 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       }
       D3D12_RENDER_TARGET_BLEND_DESC& blend_desc =
           state_desc.BlendState.RenderTarget[i];
-      // Treat 1 * src + 0 * dest as disabled blending (there are opaque
-      // surfaces drawn with blending enabled, but it's 1 * src + 0 * dest, in
-      // Call of Duty 4 - GPU performance is better when not blending.
       if (rt.src_blend != PipelineBlendFactor::kOne ||
           rt.dest_blend != PipelineBlendFactor::kZero ||
           rt.blend_op != xenos::BlendOp::kAdd ||
@@ -2128,8 +2055,7 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   }
 
   // Create the D3D12 pipeline state object.
-  auto device =
-      command_processor_.GetD3D12Context().GetD3D12Provider().GetDevice();
+  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
   if (FAILED(device->CreateGraphicsPipelineState(&state_desc,
                                                  IID_PPV_ARGS(&state)))) {

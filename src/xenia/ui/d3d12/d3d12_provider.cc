@@ -15,7 +15,8 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
-#include "xenia/ui/d3d12/d3d12_context.h"
+#include "xenia/ui/d3d12/d3d12_immediate_drawer.h"
+#include "xenia/ui/d3d12/d3d12_presenter.h"
 
 DEFINE_bool(d3d12_debug, false, "Enable Direct3D 12 and DXGI debug layer.",
             "D3D12");
@@ -47,8 +48,8 @@ bool D3D12Provider::IsD3D12APIAvailable() {
   return true;
 }
 
-std::unique_ptr<D3D12Provider> D3D12Provider::Create(Window* main_window) {
-  std::unique_ptr<D3D12Provider> provider(new D3D12Provider(main_window));
+std::unique_ptr<D3D12Provider> D3D12Provider::Create() {
+  std::unique_ptr<D3D12Provider> provider(new D3D12Provider);
   if (!provider->Initialize()) {
     xe::FatalError(
         "Unable to initialize Direct3D 12 graphics subsystem.\n"
@@ -63,9 +64,6 @@ std::unique_ptr<D3D12Provider> D3D12Provider::Create(Window* main_window) {
   return provider;
 }
 
-D3D12Provider::D3D12Provider(Window* main_window)
-    : GraphicsProvider(main_window) {}
-
 D3D12Provider::~D3D12Provider() {
   if (graphics_analysis_ != nullptr) {
     graphics_analysis_->Release();
@@ -78,6 +76,14 @@ D3D12Provider::~D3D12Provider() {
   }
   if (dxgi_factory_ != nullptr) {
     dxgi_factory_->Release();
+  }
+
+  if (cvars::d3d12_debug && pfn_dxgi_get_debug_interface1_) {
+    Microsoft::WRL::ComPtr<IDXGIDebug> dxgi_debug;
+    if (SUCCEEDED(
+            pfn_dxgi_get_debug_interface1_(0, IID_PPV_ARGS(&dxgi_debug)))) {
+      dxgi_debug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
+    }
   }
 
   if (library_dxcompiler_ != nullptr) {
@@ -120,7 +126,7 @@ bool D3D12Provider::Initialize() {
   // Load the core libraries.
   library_dxgi_ = LoadLibraryW(L"dxgi.dll");
   library_d3d12_ = LoadLibraryW(L"D3D12.dll");
-  if (library_dxgi_ == nullptr || library_d3d12_ == nullptr) {
+  if (!library_dxgi_ || !library_d3d12_) {
     XELOGE("Failed to load dxgi.dll or D3D12.dll");
     return false;
   }
@@ -154,12 +160,12 @@ bool D3D12Provider::Initialize() {
     pfn_d3d_disassemble_ =
         pD3DDisassemble(GetProcAddress(library_d3dcompiler_, "D3DDisassemble"));
     if (pfn_d3d_disassemble_ == nullptr) {
-      XELOGW(
+      XELOGD(
           "Failed to get D3DDisassemble from D3DCompiler_47.dll, DXBC "
           "disassembly for debugging will be unavailable");
     }
   } else {
-    XELOGW(
+    XELOGD(
         "Failed to load D3DCompiler_47.dll, DXBC disassembly for debugging "
         "will be unavailable");
   }
@@ -171,12 +177,12 @@ bool D3D12Provider::Initialize() {
     pfn_dxilconv_dxc_create_instance_ = DxcCreateInstanceProc(
         GetProcAddress(library_dxilconv_, "DxcCreateInstance"));
     if (pfn_dxilconv_dxc_create_instance_ == nullptr) {
-      XELOGW(
+      XELOGD(
           "Failed to get DxcCreateInstance from dxilconv.dll, converted DXIL "
           "disassembly for debugging will be unavailable");
     }
   } else {
-    XELOGW(
+    XELOGD(
         "Failed to load dxilconv.dll, converted DXIL disassembly for debugging "
         "will be unavailable - DXIL may be unsupported by your OS version");
   }
@@ -188,12 +194,12 @@ bool D3D12Provider::Initialize() {
     pfn_dxcompiler_dxc_create_instance_ = DxcCreateInstanceProc(
         GetProcAddress(library_dxcompiler_, "DxcCreateInstance"));
     if (pfn_dxcompiler_dxc_create_instance_ == nullptr) {
-      XELOGW(
+      XELOGD(
           "Failed to get DxcCreateInstance from dxcompiler.dll, converted DXIL "
           "disassembly for debugging will be unavailable");
     }
   } else {
-    XELOGW(
+    XELOGD(
         "Failed to load dxcompiler.dll, converted DXIL disassembly for "
         "debugging will be unavailable - if needed, download the DirectX "
         "Shader Compiler from "
@@ -359,7 +365,7 @@ bool D3D12Provider::Initialize() {
   if (cvars::d3d12_queue_priority >= 2) {
     queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
     if (!EnableIncreaseBasePriorityPrivilege()) {
-      XELOGD3D(
+      XELOGW(
           "Failed to enable SeIncreaseBasePriorityPrivilege for global "
           "realtime Direct3D 12 command queue priority, falling back to high "
           "priority, try launching Xenia as administrator");
@@ -377,7 +383,7 @@ bool D3D12Provider::Initialize() {
                                         IID_PPV_ARGS(&direct_queue)))) {
     bool queue_created = false;
     if (queue_desc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME) {
-      XELOGD3D(
+      XELOGW(
           "Failed to create a Direct3D 12 direct command queue with global "
           "realtime priority, falling back to high priority, try launching "
           "Xenia as administrator");
@@ -465,23 +471,13 @@ bool D3D12Provider::Initialize() {
   return true;
 }
 
-std::unique_ptr<GraphicsContext> D3D12Provider::CreateContext(
-    Window* target_window) {
-  auto new_context =
-      std::unique_ptr<D3D12Context>(new D3D12Context(this, target_window));
-  if (!new_context->Initialize()) {
-    return nullptr;
-  }
-  return std::unique_ptr<GraphicsContext>(new_context.release());
+std::unique_ptr<Presenter> D3D12Provider::CreatePresenter(
+    Presenter::HostGpuLossCallback host_gpu_loss_callback) {
+  return D3D12Presenter::Create(host_gpu_loss_callback, *this);
 }
 
-std::unique_ptr<GraphicsContext> D3D12Provider::CreateOffscreenContext() {
-  auto new_context =
-      std::unique_ptr<D3D12Context>(new D3D12Context(this, nullptr));
-  if (!new_context->Initialize()) {
-    return nullptr;
-  }
-  return std::unique_ptr<GraphicsContext>(new_context.release());
+std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
+  return D3D12ImmediateDrawer::Create(*this);
 }
 
 }  // namespace d3d12

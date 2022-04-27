@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_D3D12_D3D12_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_D3D12_D3D12_COMMAND_PROCESSOR_H_
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -20,19 +21,20 @@
 #include "xenia/base/assert.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
+#include "xenia/gpu/d3d12/d3d12_primitive_processor.h"
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 #include "xenia/gpu/d3d12/deferred_command_list.h"
 #include "xenia/gpu/d3d12/pipeline_cache.h"
-#include "xenia/gpu/d3d12/primitive_converter.h"
 #include "xenia/gpu/d3d12/texture_cache.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/dxbc_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"
-#include "xenia/ui/d3d12/d3d12_context.h"
 #include "xenia/ui/d3d12/d3d12_descriptor_heap_pool.h"
+#include "xenia/ui/d3d12/d3d12_provider.h"
 #include "xenia/ui/d3d12/d3d12_upload_buffer_pool.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 
@@ -57,8 +59,9 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void RestoreEdramSnapshot(const void* snapshot) override;
 
-  ui::d3d12::D3D12Context& GetD3D12Context() const {
-    return static_cast<ui::d3d12::D3D12Context&>(*context_);
+  ui::d3d12::D3D12Provider& GetD3D12Provider() const {
+    return *static_cast<ui::d3d12::D3D12Provider*>(
+        graphics_system_->provider());
   }
 
   // Returns the deferred drawing command list for the currently open
@@ -81,17 +84,8 @@ class D3D12CommandProcessor : public CommandProcessor {
   uint64_t GetCurrentFrame() const { return frame_current_; }
   uint64_t GetCompletedFrame() const { return frame_completed_; }
 
-  // Gets the current color write mask, taking the pixel shader's write mask
-  // into account. If a shader doesn't write to a render target, it shouldn't be
-  // written to and it shouldn't be even bound - otherwise, in Halo 3, one
-  // render target is being destroyed by a shader not writing anything, and in
-  // Banjo-Tooie, the result of clearing the top tile is being ignored because
-  // there are 4 render targets bound with the same EDRAM base (clearly not
-  // correct usage), but the shader only clears 1, and then EDRAM buffer stores
-  // conflict with each other.
-  uint32_t GetCurrentColorMask(uint32_t shader_writes_color_targets) const;
-
-  void PushTransitionBarrier(
+  // Returns true if the barrier has been inserted (the new state is different).
+  bool PushTransitionBarrier(
       ID3D12Resource* resource, D3D12_RESOURCE_STATES old_state,
       D3D12_RESOURCE_STATES new_state,
       UINT subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
@@ -152,7 +146,7 @@ class D3D12CommandProcessor : public CommandProcessor {
     kEdramR32G32UintUAV,
     kEdramR32G32B32A32UintUAV,
 
-    kGammaRampNormalSRV,
+    kGammaRampTableSRV,
     kGammaRampPWLSRV,
 
     // Beyond this point, SRVs are accessible to shaders through an unbounded
@@ -209,16 +203,14 @@ class D3D12CommandProcessor : public CommandProcessor {
   // Returns the text to display in the GPU backend name in the window title.
   std::string GetWindowTitleText() const;
 
-  std::unique_ptr<xe::ui::RawImage> Capture();
-
  protected:
   bool SetupContext() override;
   void ShutdownContext() override;
 
   void WriteRegister(uint32_t index, uint32_t value) override;
 
-  void PerformSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
-                   uint32_t frontbuffer_height) override;
+  void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                 uint32_t frontbuffer_height) override;
 
   void OnPrimaryBufferEnd() override;
 
@@ -313,6 +305,9 @@ class D3D12CommandProcessor : public CommandProcessor {
   // open non-frame submission, BeginSubmission(true) will promote it to a
   // frame. EndSubmission(true) will close the frame no matter whether the
   // submission has already been closed.
+  // Submission (ExecuteCommandLists) boundaries are implicit full UAV and
+  // aliasing barriers, and also result in common resource state promotion and
+  // decay.
 
   // Rechecks submission number and reclaims per-submission resources. Pass 0 as
   // the submission to await to simply check status, or pass submission_current_
@@ -320,8 +315,9 @@ class D3D12CommandProcessor : public CommandProcessor {
   void CheckSubmissionFence(uint64_t await_submission);
   // If is_guest_command is true, a new full frame - with full cleanup of
   // resources and, if needed, starting capturing - is opened if pending (as
-  // opposed to simply resuming after mid-frame synchronization).
-  void BeginSubmission(bool is_guest_command);
+  // opposed to simply resuming after mid-frame synchronization). Returns
+  // whether a submission is open currently and the device is not removed.
+  bool BeginSubmission(bool is_guest_command);
   // If is_swap is true, a full frame is closed - with, if needed, cache
   // clearing and stopping capturing. Returns whether the submission was done
   // successfully, if it has failed, leaves it open.
@@ -354,14 +350,16 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void UpdateFixedFunctionState(const draw_util::ViewportInfo& viewport_info,
                                 const draw_util::Scissor& scissor,
-                                bool primitive_polygonal);
+                                bool primitive_polygonal,
+                                reg::RB_DEPTHCONTROL normalized_depth_control);
   void UpdateSystemConstantValues(bool shared_memory_is_uav,
                                   bool primitive_polygonal,
                                   uint32_t line_loop_closing_index,
                                   xenos::Endian index_endian,
                                   const draw_util::ViewportInfo& viewport_info,
                                   uint32_t used_texture_mask,
-                                  uint32_t color_mask);
+                                  reg::RB_DEPTHCONTROL normalized_depth_control,
+                                  uint32_t normalized_color_mask);
   bool UpdateBindings(const D3D12Shader* vertex_shader,
                       const D3D12Shader* pixel_shader,
                       ID3D12RootSignature* root_signature);
@@ -378,6 +376,8 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12Resource* RequestReadbackBuffer(uint32_t size);
 
   void WriteGammaRampSRV(bool is_pwl, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
+
+  bool device_removed_ = false;
 
   bool cache_clear_requested_ = false;
 
@@ -490,41 +490,79 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   std::unique_ptr<D3D12SharedMemory> shared_memory_;
 
+  std::unique_ptr<D3D12PrimitiveProcessor> primitive_processor_;
+
   std::unique_ptr<PipelineCache> pipeline_cache_;
 
   std::unique_ptr<TextureCache> texture_cache_;
 
-  std::unique_ptr<PrimitiveConverter> primitive_converter_;
-
-  // Mip 0 contains the normal gamma ramp (256 entries), mip 1 contains the PWL
-  // ramp (128 entries). DXGI_FORMAT_R10G10B10A2_UNORM 1D.
-  ID3D12Resource* gamma_ramp_texture_ = nullptr;
-  D3D12_RESOURCE_STATES gamma_ramp_texture_state_;
+  // Bytes 0x0...0x3FF - 256-entry R10G10B10X2 gamma ramp (red and blue must be
+  // read as swapped - 535107D4 has settings allowing separate configuration).
+  // Bytes 0x400...0x9FF - 128-entry PWL R16G16 gamma ramp (R - base, G - delta,
+  // low 6 bits of each are zero, 3 elements per entry).
+  // https://www.x.org/docs/AMD/old/42590_m76_rrg_1.01o.pdf
+  Microsoft::WRL::ComPtr<ID3D12Resource> gamma_ramp_buffer_;
+  D3D12_RESOURCE_STATES gamma_ramp_buffer_state_;
   // Upload buffer for an image that is the same as gamma_ramp_, but with
   // kQueueFrames array layers.
-  ID3D12Resource* gamma_ramp_upload_ = nullptr;
-  uint8_t* gamma_ramp_upload_mapping_ = nullptr;
-  D3D12_PLACED_SUBRESOURCE_FOOTPRINT gamma_ramp_footprints_[kQueueFrames * 2];
+  Microsoft::WRL::ComPtr<ID3D12Resource> gamma_ramp_upload_buffer_;
+  uint8_t* gamma_ramp_upload_buffer_mapping_ = nullptr;
 
-  static constexpr uint32_t kSwapTextureWidth = 1280;
-  static constexpr uint32_t kSwapTextureHeight = 720;
-  std::pair<uint32_t, uint32_t> GetSwapTextureSize() const {
-    uint32_t resolution_scale = texture_cache_->GetDrawResolutionScale();
-    return std::make_pair(kSwapTextureWidth * resolution_scale,
-                          kSwapTextureHeight * resolution_scale);
-  }
-  ID3D12Resource* swap_texture_ = nullptr;
-  D3D12_PLACED_SUBRESOURCE_FOOTPRINT swap_texture_copy_footprint_;
-  UINT64 swap_texture_copy_size_;
-  ID3D12DescriptorHeap* swap_texture_rtv_descriptor_heap_ = nullptr;
-  D3D12_CPU_DESCRIPTOR_HANDLE swap_texture_rtv_;
-  ID3D12DescriptorHeap* swap_texture_srv_descriptor_heap_ = nullptr;
+  struct ApplyGammaConstants {
+    uint32_t size[2];
+  };
+  enum class ApplyGammaRootParameter : UINT {
+    kConstants,
+    kDestination,
+    kSource,
+    kRamp,
+
+    kCount,
+  };
+  Microsoft::WRL::ComPtr<ID3D12RootSignature> apply_gamma_root_signature_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> apply_gamma_table_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState>
+      apply_gamma_table_fxaa_luma_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> apply_gamma_pwl_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState>
+      apply_gamma_pwl_fxaa_luma_pipeline_;
+
+  struct FxaaConstants {
+    uint32_t size[2];
+    float size_inv[2];
+  };
+  enum class FxaaRootParameter : UINT {
+    kConstants,
+    kDestination,
+    kSource,
+
+    kCount,
+  };
+  Microsoft::WRL::ComPtr<ID3D12RootSignature> fxaa_root_signature_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> fxaa_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> fxaa_extreme_pipeline_;
+
+  // PWL gamma ramp can result in values with more precision than 10bpc. Though
+  // those sub-10bpc bits don't have any noticeable visual effect, so normally
+  // R10G10B10A2_UNORM is enough. But what's the most important is that for the
+  // original FXAA shader, the luma needs to be written to the alpha channel.
+  // For simplicity (to avoid modifying the FXAA shader and adding more texture
+  // fetches into it), and for the highest quality (preserving all 13 bits that
+  // may be generated by applying the PWL gamma ramp with an increment of 2^3,
+  // and also leaving some space for the result of applying fractional weights
+  // to calculate the luma), using R16G16B16A16_UNORM instead of
+  // R10G10B10X2_UNORM with a separate alpha texture.
+  static constexpr DXGI_FORMAT kFxaaSourceTextureFormat =
+      DXGI_FORMAT_R16G16B16A16_UNORM;
+  // Kept in NON_PIXEL_SHADER_RESOURCE state.
+  Microsoft::WRL::ComPtr<ID3D12Resource> fxaa_source_texture_;
+  uint64_t fxaa_source_texture_submission_ = 0;
 
   // Unsubmitted barrier batch.
   std::vector<D3D12_RESOURCE_BARRIER> barriers_;
 
   // <Resource, submission where requested>, sorted by the submission number.
-  std::deque<std::pair<ID3D12Resource*, uint64_t>> buffers_for_deletion_;
+  std::deque<std::pair<uint64_t, ID3D12Resource*>> resources_for_deletion_;
 
   static constexpr uint32_t kScratchBufferSizeIncrement = 16 * 1024 * 1024;
   ID3D12Resource* scratch_buffer_ = nullptr;
@@ -552,8 +590,8 @@ class D3D12CommandProcessor : public CommandProcessor {
   // Currently bound pipeline, either a graphics pipeline from the pipeline
   // cache (with potentially deferred creation - current_external_pipeline_ is
   // nullptr in this case) or a non-Xenos graphics or compute pipeline
-  // (current_cached_pipeline_ is nullptr in this case).
-  void* current_cached_pipeline_;
+  // (current_guest_pipeline_ is nullptr in this case).
+  void* current_guest_pipeline_;
   ID3D12PipelineState* current_external_pipeline_;
 
   // Currently bound graphics root signature.

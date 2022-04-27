@@ -16,6 +16,7 @@
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/vulkan/vulkan_gpu_flags.h"
+#include "xenia/ui/vulkan/vulkan_util.h"
 
 #include <cinttypes>
 #include <string>
@@ -24,18 +25,20 @@ namespace xe {
 namespace gpu {
 namespace vulkan {
 
-using xe::ui::vulkan::CheckResult;
+using xe::ui::vulkan::util::CheckResult;
 
-// Generated with `xenia-build genspirv`.
-#include "xenia/gpu/vulkan/shaders/bin/dummy_frag.h"
-#include "xenia/gpu/vulkan/shaders/bin/line_quad_list_geom.h"
-#include "xenia/gpu/vulkan/shaders/bin/point_list_geom.h"
-#include "xenia/gpu/vulkan/shaders/bin/quad_list_geom.h"
-#include "xenia/gpu/vulkan/shaders/bin/rect_list_geom.h"
+// Generated with `xb buildshaders`.
+namespace shaders {
+#include "xenia/gpu/vulkan/shaders/bytecode/vulkan_spirv/dummy_ps.h"
+#include "xenia/gpu/vulkan/shaders/bytecode/vulkan_spirv/line_quad_list_gs.h"
+#include "xenia/gpu/vulkan/shaders/bytecode/vulkan_spirv/point_list_gs.h"
+#include "xenia/gpu/vulkan/shaders/bytecode/vulkan_spirv/quad_list_gs.h"
+#include "xenia/gpu/vulkan/shaders/bytecode/vulkan_spirv/rect_list_gs.h"
+}  // namespace shaders
 
 PipelineCache::PipelineCache(RegisterFile* register_file,
-                             ui::vulkan::VulkanDevice* device)
-    : register_file_(register_file), device_(device) {
+                             const ui::vulkan::VulkanProvider& provider)
+    : register_file_(register_file), provider_(provider) {
   shader_translator_.reset(new SpirvShaderTranslator());
 }
 
@@ -45,6 +48,8 @@ VkResult PipelineCache::Initialize(
     VkDescriptorSetLayout uniform_descriptor_set_layout,
     VkDescriptorSetLayout texture_descriptor_set_layout,
     VkDescriptorSetLayout vertex_descriptor_set_layout) {
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   VkResult status;
 
   // Initialize the shared driver pipeline cache.
@@ -57,8 +62,8 @@ VkResult PipelineCache::Initialize(
   pipeline_cache_info.flags = 0;
   pipeline_cache_info.initialDataSize = 0;
   pipeline_cache_info.pInitialData = nullptr;
-  status = vkCreatePipelineCache(*device_, &pipeline_cache_info, nullptr,
-                                 &pipeline_cache_);
+  status = dfn.vkCreatePipelineCache(device, &pipeline_cache_info, nullptr,
+                                     &pipeline_cache_);
   if (status != VK_SUCCESS) {
     return status;
   }
@@ -95,8 +100,8 @@ VkResult PipelineCache::Initialize(
   pipeline_layout_info.pushConstantRangeCount =
       static_cast<uint32_t>(xe::countof(push_constant_ranges));
   pipeline_layout_info.pPushConstantRanges = push_constant_ranges;
-  status = vkCreatePipelineLayout(*device_, &pipeline_layout_info, nullptr,
-                                  &pipeline_layout_);
+  status = dfn.vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr,
+                                      &pipeline_layout_);
   if (status != VK_SUCCESS) {
     return status;
   }
@@ -108,62 +113,59 @@ VkResult PipelineCache::Initialize(
   shader_module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
   shader_module_info.pNext = nullptr;
   shader_module_info.flags = 0;
-  shader_module_info.codeSize =
-      static_cast<uint32_t>(sizeof(line_quad_list_geom));
-  shader_module_info.pCode =
-      reinterpret_cast<const uint32_t*>(line_quad_list_geom);
-  status = vkCreateShaderModule(*device_, &shader_module_info, nullptr,
-                                &geometry_shaders_.line_quad_list);
+  shader_module_info.codeSize = sizeof(shaders::line_quad_list_gs);
+  shader_module_info.pCode = shaders::line_quad_list_gs;
+  status = dfn.vkCreateShaderModule(device, &shader_module_info, nullptr,
+                                    &geometry_shaders_.line_quad_list);
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(geometry_shaders_.line_quad_list),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(g): Line Quad List");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(geometry_shaders_.line_quad_list),
+                                "S(g): Line Quad List");
 
-  shader_module_info.codeSize = static_cast<uint32_t>(sizeof(point_list_geom));
-  shader_module_info.pCode = reinterpret_cast<const uint32_t*>(point_list_geom);
-  status = vkCreateShaderModule(*device_, &shader_module_info, nullptr,
-                                &geometry_shaders_.point_list);
+  shader_module_info.codeSize = sizeof(shaders::point_list_gs);
+  shader_module_info.pCode = shaders::point_list_gs;
+  status = dfn.vkCreateShaderModule(device, &shader_module_info, nullptr,
+                                    &geometry_shaders_.point_list);
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(geometry_shaders_.point_list),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(g): Point List");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(geometry_shaders_.point_list),
+                                "S(g): Point List");
 
-  shader_module_info.codeSize = static_cast<uint32_t>(sizeof(quad_list_geom));
-  shader_module_info.pCode = reinterpret_cast<const uint32_t*>(quad_list_geom);
-  status = vkCreateShaderModule(*device_, &shader_module_info, nullptr,
-                                &geometry_shaders_.quad_list);
+  shader_module_info.codeSize = sizeof(shaders::quad_list_gs);
+  shader_module_info.pCode = shaders::quad_list_gs;
+  status = dfn.vkCreateShaderModule(device, &shader_module_info, nullptr,
+                                    &geometry_shaders_.quad_list);
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(geometry_shaders_.quad_list),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(g): Quad List");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(geometry_shaders_.quad_list),
+                                "S(g): Quad List");
 
-  shader_module_info.codeSize = static_cast<uint32_t>(sizeof(rect_list_geom));
-  shader_module_info.pCode = reinterpret_cast<const uint32_t*>(rect_list_geom);
-  status = vkCreateShaderModule(*device_, &shader_module_info, nullptr,
-                                &geometry_shaders_.rect_list);
+  shader_module_info.codeSize = sizeof(shaders::rect_list_gs);
+  shader_module_info.pCode = shaders::rect_list_gs;
+  status = dfn.vkCreateShaderModule(device, &shader_module_info, nullptr,
+                                    &geometry_shaders_.rect_list);
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(geometry_shaders_.rect_list),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(g): Rect List");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(geometry_shaders_.rect_list),
+                                "S(g): Rect List");
 
-  shader_module_info.codeSize = static_cast<uint32_t>(sizeof(dummy_frag));
-  shader_module_info.pCode = reinterpret_cast<const uint32_t*>(dummy_frag);
-  status = vkCreateShaderModule(*device_, &shader_module_info, nullptr,
-                                &dummy_pixel_shader_);
+  shader_module_info.codeSize = sizeof(shaders::dummy_ps);
+  shader_module_info.pCode = shaders::dummy_ps;
+  status = dfn.vkCreateShaderModule(device, &shader_module_info, nullptr,
+                                    &dummy_pixel_shader_);
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(dummy_pixel_shader_),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(p): Dummy");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(dummy_pixel_shader_), "S(g): Dummy");
 
   return VK_SUCCESS;
 }
@@ -171,34 +173,38 @@ VkResult PipelineCache::Initialize(
 void PipelineCache::Shutdown() {
   ClearCache();
 
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+
   // Destroy geometry shaders.
   if (geometry_shaders_.line_quad_list) {
-    vkDestroyShaderModule(*device_, geometry_shaders_.line_quad_list, nullptr);
+    dfn.vkDestroyShaderModule(device, geometry_shaders_.line_quad_list,
+                              nullptr);
     geometry_shaders_.line_quad_list = nullptr;
   }
   if (geometry_shaders_.point_list) {
-    vkDestroyShaderModule(*device_, geometry_shaders_.point_list, nullptr);
+    dfn.vkDestroyShaderModule(device, geometry_shaders_.point_list, nullptr);
     geometry_shaders_.point_list = nullptr;
   }
   if (geometry_shaders_.quad_list) {
-    vkDestroyShaderModule(*device_, geometry_shaders_.quad_list, nullptr);
+    dfn.vkDestroyShaderModule(device, geometry_shaders_.quad_list, nullptr);
     geometry_shaders_.quad_list = nullptr;
   }
   if (geometry_shaders_.rect_list) {
-    vkDestroyShaderModule(*device_, geometry_shaders_.rect_list, nullptr);
+    dfn.vkDestroyShaderModule(device, geometry_shaders_.rect_list, nullptr);
     geometry_shaders_.rect_list = nullptr;
   }
   if (dummy_pixel_shader_) {
-    vkDestroyShaderModule(*device_, dummy_pixel_shader_, nullptr);
+    dfn.vkDestroyShaderModule(device, dummy_pixel_shader_, nullptr);
     dummy_pixel_shader_ = nullptr;
   }
 
   if (pipeline_layout_) {
-    vkDestroyPipelineLayout(*device_, pipeline_layout_, nullptr);
+    dfn.vkDestroyPipelineLayout(device, pipeline_layout_, nullptr);
     pipeline_layout_ = nullptr;
   }
   if (pipeline_cache_) {
-    vkDestroyPipelineCache(*device_, pipeline_cache_, nullptr);
+    dfn.vkDestroyPipelineCache(device, pipeline_cache_, nullptr);
     pipeline_cache_ = nullptr;
   }
 }
@@ -219,7 +225,7 @@ VulkanShader* PipelineCache::LoadShader(xenos::ShaderType shader_type,
   // Always create the shader and stash it away.
   // We need to track it even if it fails translation so we know not to try
   // again.
-  VulkanShader* shader = new VulkanShader(device_, shader_type, data_hash,
+  VulkanShader* shader = new VulkanShader(provider_, shader_type, data_hash,
                                           host_address, dword_count);
   shader_map_.insert({data_hash, shader});
 
@@ -274,9 +280,11 @@ PipelineCache::UpdateStatus PipelineCache::ConfigurePipeline(
 }
 
 void PipelineCache::ClearCache() {
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   // Destroy all pipelines.
   for (auto it : cached_pipelines_) {
-    vkDestroyPipeline(*device_, it.second, nullptr);
+    dfn.vkDestroyPipeline(device, it.second, nullptr);
   }
   cached_pipelines_.clear();
   COUNT_profile_set("gpu/pipeline_cache/pipelines", 0);
@@ -338,8 +346,10 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
   pipeline_info.basePipelineHandle = nullptr;
   pipeline_info.basePipelineIndex = -1;
   VkPipeline pipeline = nullptr;
-  auto result = vkCreateGraphicsPipelines(*device_, pipeline_cache_, 1,
-                                          &pipeline_info, nullptr, &pipeline);
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+  auto result = dfn.vkCreateGraphicsPipelines(
+      device, pipeline_cache_, 1, &pipeline_info, nullptr, &pipeline);
   if (result != VK_SUCCESS) {
     XELOGE("vkCreateGraphicsPipelines failed with code {}", result);
     assert_always();
@@ -348,9 +358,10 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
 
   // Dump shader disassembly.
   if (cvars::vulkan_dump_disasm) {
-    if (device_->HasEnabledExtension(VK_AMD_SHADER_INFO_EXTENSION_NAME)) {
+    if (provider_.device_extensions().amd_shader_info) {
       DumpShaderDisasmAMD(pipeline);
-    } else if (device_->device_info().properties.vendorID == 0x10DE) {
+    } else if (provider_.device_properties().vendorID ==
+               uint32_t(ui::GraphicsProvider::GpuVendorID::kNvidia)) {
       // NVIDIA cards
       DumpShaderDisasmNV(pipeline_info);
     }
@@ -415,9 +426,8 @@ static void DumpShaderStatisticsAMD(const VkShaderStatisticsInfoAMD& stats) {
 }
 
 void PipelineCache::DumpShaderDisasmAMD(VkPipeline pipeline) {
-  auto fn_GetShaderInfoAMD = (PFN_vkGetShaderInfoAMD)vkGetDeviceProcAddr(
-      *device_, "vkGetShaderInfoAMD");
-
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   VkResult status = VK_SUCCESS;
   size_t data_size = 0;
 
@@ -425,18 +435,18 @@ void PipelineCache::DumpShaderDisasmAMD(VkPipeline pipeline) {
   data_size = sizeof(stats);
 
   // Vertex shader
-  status = fn_GetShaderInfoAMD(*device_, pipeline, VK_SHADER_STAGE_VERTEX_BIT,
-                               VK_SHADER_INFO_TYPE_STATISTICS_AMD, &data_size,
-                               &stats);
+  status = dfn.vkGetShaderInfoAMD(device, pipeline, VK_SHADER_STAGE_VERTEX_BIT,
+                                  VK_SHADER_INFO_TYPE_STATISTICS_AMD,
+                                  &data_size, &stats);
   if (status == VK_SUCCESS) {
     XELOGI("AMD Vertex Shader Statistics:");
     DumpShaderStatisticsAMD(stats);
   }
 
   // Fragment shader
-  status = fn_GetShaderInfoAMD(*device_, pipeline, VK_SHADER_STAGE_FRAGMENT_BIT,
-                               VK_SHADER_INFO_TYPE_STATISTICS_AMD, &data_size,
-                               &stats);
+  status = dfn.vkGetShaderInfoAMD(
+      device, pipeline, VK_SHADER_STAGE_FRAGMENT_BIT,
+      VK_SHADER_INFO_TYPE_STATISTICS_AMD, &data_size, &stats);
   if (status == VK_SUCCESS) {
     XELOGI("AMD Fragment Shader Statistics:");
     DumpShaderStatisticsAMD(stats);
@@ -451,6 +461,9 @@ void PipelineCache::DumpShaderDisasmNV(
   // This code is super ugly. Update this when NVidia includes an official
   // way to dump shader disassembly.
 
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+
   VkPipelineCacheCreateInfo pipeline_cache_info;
   VkPipelineCache dummy_pipeline_cache;
   pipeline_cache_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
@@ -458,23 +471,24 @@ void PipelineCache::DumpShaderDisasmNV(
   pipeline_cache_info.flags = 0;
   pipeline_cache_info.initialDataSize = 0;
   pipeline_cache_info.pInitialData = nullptr;
-  auto status = vkCreatePipelineCache(*device_, &pipeline_cache_info, nullptr,
-                                      &dummy_pipeline_cache);
+  auto status = dfn.vkCreatePipelineCache(device, &pipeline_cache_info, nullptr,
+                                          &dummy_pipeline_cache);
   CheckResult(status, "vkCreatePipelineCache");
 
   // Create a pipeline on the dummy cache and dump it.
   VkPipeline dummy_pipeline;
-  status = vkCreateGraphicsPipelines(*device_, dummy_pipeline_cache, 1,
-                                     &pipeline_info, nullptr, &dummy_pipeline);
+  status =
+      dfn.vkCreateGraphicsPipelines(device, dummy_pipeline_cache, 1,
+                                    &pipeline_info, nullptr, &dummy_pipeline);
 
   std::vector<uint8_t> pipeline_data;
   size_t data_size = 0;
-  status = vkGetPipelineCacheData(*device_, dummy_pipeline_cache, &data_size,
-                                  nullptr);
+  status = dfn.vkGetPipelineCacheData(device, dummy_pipeline_cache, &data_size,
+                                      nullptr);
   if (status == VK_SUCCESS) {
     pipeline_data.resize(data_size);
-    vkGetPipelineCacheData(*device_, dummy_pipeline_cache, &data_size,
-                           pipeline_data.data());
+    dfn.vkGetPipelineCacheData(device, dummy_pipeline_cache, &data_size,
+                               pipeline_data.data());
 
     // Scan the data for the disassembly.
     std::string disasm_vp, disasm_fp;
@@ -530,8 +544,8 @@ void PipelineCache::DumpShaderDisasmNV(
            disasm_fp);
   }
 
-  vkDestroyPipeline(*device_, dummy_pipeline, nullptr);
-  vkDestroyPipelineCache(*device_, dummy_pipeline_cache, nullptr);
+  dfn.vkDestroyPipeline(device, dummy_pipeline, nullptr);
+  dfn.vkDestroyPipelineCache(device, dummy_pipeline_cache, nullptr);
 }
 
 VkShaderModule PipelineCache::GetGeometryShader(
@@ -575,6 +589,7 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
   SCOPE_profile_cpu_f("gpu");
 #endif  // FINE_GRAINED_DRAW_SCOPES
 
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
   auto& regs = set_dynamic_state_registers_;
 
   bool window_offset_dirty = SetShadowRegister(&regs.pa_sc_window_offset,
@@ -620,7 +635,7 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
     scissor_rect.offset.y = ws_y - adj_y;
     scissor_rect.extent.width = std::max(ws_w + adj_x, 0);
     scissor_rect.extent.height = std::max(ws_h + adj_y, 0);
-    vkCmdSetScissor(command_buffer, 0, 1, &scissor_rect);
+    dfn.vkCmdSetScissor(command_buffer, 0, 1, &scissor_rect);
   }
 
   // VK_DYNAMIC_STATE_VIEWPORT
@@ -713,7 +728,7 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
     assert_true(viewport_rect.minDepth >= 0 && viewport_rect.minDepth <= 1);
     assert_true(viewport_rect.maxDepth >= -1 && viewport_rect.maxDepth <= 1);
 
-    vkCmdSetViewport(command_buffer, 0, 1, &viewport_rect);
+    dfn.vkCmdSetViewport(command_buffer, 0, 1, &viewport_rect);
   }
 
   // VK_DYNAMIC_STATE_DEPTH_BIAS
@@ -750,7 +765,7 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
       depth_bias_scale = depth_bias_scales[1];
       depth_bias_offset = depth_bias_offsets[1];
     }
-    // Convert to Vulkan units based on the values in Call of Duty 4:
+    // Convert to Vulkan units based on the values in 415607E6:
     // r_polygonOffsetScale is -1 there, but 32 in the register.
     // r_polygonOffsetBias is -1 also, but passing 2/65536.
     // 1/65536 and 2 scales are applied separately, however, and for shadow maps
@@ -767,13 +782,13 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
         regs.pa_su_poly_offset_offset != depth_bias_offset_vulkan) {
       regs.pa_su_poly_offset_scale = depth_bias_scale_vulkan;
       regs.pa_su_poly_offset_offset = depth_bias_offset_vulkan;
-      vkCmdSetDepthBias(command_buffer, depth_bias_offset_vulkan, 0.0f,
-                        depth_bias_scale_vulkan);
+      dfn.vkCmdSetDepthBias(command_buffer, depth_bias_offset_vulkan, 0.0f,
+                            depth_bias_scale_vulkan);
     }
   } else if (full_update) {
     regs.pa_su_poly_offset_scale = 0.0f;
     regs.pa_su_poly_offset_offset = 0.0f;
-    vkCmdSetDepthBias(command_buffer, 0.0f, 0.0f, 0.0f);
+    dfn.vkCmdSetDepthBias(command_buffer, 0.0f, 0.0f, 0.0f);
   }
 
   // VK_DYNAMIC_STATE_BLEND_CONSTANTS
@@ -787,7 +802,7 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
   blend_constant_state_dirty |=
       SetShadowRegister(&regs.rb_blend_rgba[3], XE_GPU_REG_RB_BLEND_ALPHA);
   if (blend_constant_state_dirty) {
-    vkCmdSetBlendConstants(command_buffer, regs.rb_blend_rgba);
+    dfn.vkCmdSetBlendConstants(command_buffer, regs.rb_blend_rgba);
   }
 
   bool stencil_state_dirty = full_update;
@@ -799,16 +814,16 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
     uint32_t stencil_write_mask = (regs.rb_stencilrefmask >> 16) & 0xFF;
 
     // VK_DYNAMIC_STATE_STENCIL_REFERENCE
-    vkCmdSetStencilReference(command_buffer, VK_STENCIL_FRONT_AND_BACK,
-                             stencil_ref);
+    dfn.vkCmdSetStencilReference(command_buffer, VK_STENCIL_FRONT_AND_BACK,
+                                 stencil_ref);
 
     // VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK
-    vkCmdSetStencilCompareMask(command_buffer, VK_STENCIL_FRONT_AND_BACK,
-                               stencil_read_mask);
+    dfn.vkCmdSetStencilCompareMask(command_buffer, VK_STENCIL_FRONT_AND_BACK,
+                                   stencil_read_mask);
 
     // VK_DYNAMIC_STATE_STENCIL_WRITE_MASK
-    vkCmdSetStencilWriteMask(command_buffer, VK_STENCIL_FRONT_AND_BACK,
-                             stencil_write_mask);
+    dfn.vkCmdSetStencilWriteMask(command_buffer, VK_STENCIL_FRONT_AND_BACK,
+                                 stencil_write_mask);
   }
 
   bool push_constants_dirty = full_update || viewport_state_dirty;
@@ -905,19 +920,19 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
     push_constants.ps_param_gen =
         regs.sq_program_cntl.param_gen ? ps_param_gen : -1;
 
-    vkCmdPushConstants(command_buffer, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT |
-                           VK_SHADER_STAGE_GEOMETRY_BIT |
-                           VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, kSpirvPushConstantsSize, &push_constants);
+    dfn.vkCmdPushConstants(command_buffer, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_GEOMETRY_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, kSpirvPushConstantsSize, &push_constants);
   }
 
   if (full_update) {
     // VK_DYNAMIC_STATE_LINE_WIDTH
-    vkCmdSetLineWidth(command_buffer, 1.0f);
+    dfn.vkCmdSetLineWidth(command_buffer, 1.0f);
 
     // VK_DYNAMIC_STATE_DEPTH_BOUNDS
-    vkCmdSetDepthBounds(command_buffer, 0.0f, 1.0f);
+    dfn.vkCmdSetDepthBounds(command_buffer, 0.0f, 1.0f);
   }
 
   return true;

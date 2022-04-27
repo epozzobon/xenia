@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -18,13 +18,13 @@
 #include "xenia/gpu/trace_protocol.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
-
-namespace xe {
-namespace ui {
-class Loop;
-class Window;
-}  // namespace ui
-}  // namespace xe
+#include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/immediate_drawer.h"
+#include "xenia/ui/presenter.h"
+#include "xenia/ui/window.h"
+#include "xenia/ui/window_listener.h"
+#include "xenia/ui/windowed_app.h"
 
 namespace xe {
 namespace gpu {
@@ -32,16 +32,18 @@ namespace gpu {
 struct SamplerInfo;
 struct TextureInfo;
 
-class TraceViewer {
+class TraceViewer : public xe::ui::WindowedApp {
  public:
   virtual ~TraceViewer();
 
-  int Main(const std::vector<std::string>& args);
+  bool OnInitialize() override;
 
  protected:
-  TraceViewer();
+  explicit TraceViewer(xe::ui::WindowedAppContext& app_context,
+                       const std::string_view name);
 
   virtual std::unique_ptr<gpu::GraphicsSystem> CreateGraphicsSystem() = 0;
+  GraphicsSystem* graphics_system() const { return graphics_system_; }
 
   void DrawMultilineString(const std::string_view str);
 
@@ -60,14 +62,34 @@ class TraceViewer {
 
   virtual bool Setup();
 
-  std::unique_ptr<xe::ui::Loop> loop_;
-  std::unique_ptr<xe::ui::Window> window_;
-  std::unique_ptr<Emulator> emulator_;
-  Memory* memory_ = nullptr;
-  GraphicsSystem* graphics_system_ = nullptr;
-  std::unique_ptr<TracePlayer> player_;
-
  private:
+  class TraceViewerWindowListener final : public xe::ui::WindowListener,
+                                          public xe::ui::WindowInputListener {
+   public:
+    explicit TraceViewerWindowListener(TraceViewer& trace_viewer)
+        : trace_viewer_(trace_viewer) {}
+
+    void OnClosing(xe::ui::UIEvent& e) override;
+
+    void OnKeyDown(xe::ui::KeyEvent& e) override;
+
+   private:
+    TraceViewer& trace_viewer_;
+  };
+
+  class TraceViewerDialog final : public ui::ImGuiDialog {
+   public:
+    explicit TraceViewerDialog(xe::ui::ImGuiDrawer* imgui_drawer,
+                               TraceViewer& trace_viewer)
+        : xe::ui::ImGuiDialog(imgui_drawer), trace_viewer_(trace_viewer) {}
+
+   protected:
+    void OnDraw(ImGuiIO& io) override;
+
+   private:
+    TraceViewer& trace_viewer_;
+  };
+
   enum class ShaderDisplayType : int {
     kUcode,
     kTranslated,
@@ -75,7 +97,6 @@ class TraceViewer {
   };
 
   bool Load(const std::filesystem::path& trace_file_path);
-  void Run();
 
   void DrawUI();
   void DrawControllerUI();
@@ -98,6 +119,20 @@ class TraceViewer {
   void DrawVertexFetcher(Shader* shader,
                          const Shader::VertexBinding& vertex_binding,
                          const xenos::xe_gpu_vertex_fetch_t* fetch);
+
+  TraceViewerWindowListener window_listener_;
+
+  std::unique_ptr<xe::ui::Window> window_;
+
+  std::unique_ptr<Emulator> emulator_;
+  Memory* memory_ = nullptr;
+  GraphicsSystem* graphics_system_ = nullptr;
+  std::unique_ptr<TracePlayer> player_;
+
+  std::unique_ptr<xe::ui::Presenter> presenter_;
+  std::unique_ptr<xe::ui::ImmediateDrawer> immediate_drawer_;
+  std::unique_ptr<xe::ui::ImGuiDrawer> imgui_drawer_;
+  std::unique_ptr<TraceViewerDialog> trace_viewer_dialog_;
 };
 
 }  // namespace gpu

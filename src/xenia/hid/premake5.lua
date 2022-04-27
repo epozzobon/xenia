@@ -22,7 +22,6 @@ project("xenia-hid-demo")
   links({
     "fmt",
     "imgui",
-    "volk",
     "xenia-base",
     "xenia-helper-sdl",
     "xenia-hid",
@@ -31,9 +30,12 @@ project("xenia-hid-demo")
     "xenia-ui",
     "xenia-ui-vulkan",
   })
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
+  })
   files({
     "hid_demo.cc",
-    "../base/main_"..platform_suffix..".cc",
+    "../ui/windowed_app_main_"..platform_suffix..".cc",
   })
   resincludedirs({
     project_root,
@@ -42,7 +44,6 @@ project("xenia-hid-demo")
   filter("platforms:Linux")
     links({
       "SDL2",
-      "vulkan",
       "X11",
       "xcb",
       "X11-xcb",

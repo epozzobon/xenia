@@ -16,6 +16,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/vulkan/vulkan_gpu_flags.h"
 #include "xenia/ui/vulkan/vulkan_mem_alloc.h"
+#include "xenia/ui/vulkan/vulkan_util.h"
 
 using namespace xe::gpu::xenos;
 
@@ -70,7 +71,7 @@ void copy_cmp_swap_32_unaligned(void* dest_ptr, const void* src_ptr,
   }
 }
 #else
-void copy_and_swap_16_unaligned(void* dest_ptr, const void* src_ptr,
+void copy_cmp_swap_16_unaligned(void* dest_ptr, const void* src_ptr,
                                 uint16_t cmp_value, size_t count) {
   auto dest = reinterpret_cast<uint16_t*>(dest_ptr);
   auto src = reinterpret_cast<const uint16_t*>(src_ptr);
@@ -80,7 +81,7 @@ void copy_and_swap_16_unaligned(void* dest_ptr, const void* src_ptr,
   }
 }
 
-void copy_and_swap_32_unaligned(void* dest_ptr, const void* src_ptr,
+void copy_cmp_swap_32_unaligned(void* dest_ptr, const void* src_ptr,
                                 uint32_t cmp_value, size_t count) {
   auto dest = reinterpret_cast<uint32_t*>(dest_ptr);
   auto src = reinterpret_cast<const uint32_t*>(src_ptr);
@@ -91,16 +92,17 @@ void copy_and_swap_32_unaligned(void* dest_ptr, const void* src_ptr,
 }
 #endif
 
-using xe::ui::vulkan::CheckResult;
+using xe::ui::vulkan::util::CheckResult;
 
 constexpr VkDeviceSize kConstantRegisterUniformRange =
     512 * 4 * 4 + 8 * 4 + 32 * 4;
 
 BufferCache::BufferCache(RegisterFile* register_file, Memory* memory,
-                         ui::vulkan::VulkanDevice* device, size_t capacity)
-    : register_file_(register_file), memory_(memory), device_(device) {
+                         const ui::vulkan::VulkanProvider& provider,
+                         size_t capacity)
+    : register_file_(register_file), memory_(memory), provider_(provider) {
   transient_buffer_ = std::make_unique<ui::vulkan::CircularBuffer>(
-      device_,
+      provider_,
       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
       capacity, 256);
@@ -109,23 +111,41 @@ BufferCache::BufferCache(RegisterFile* register_file, Memory* memory,
 BufferCache::~BufferCache() { Shutdown(); }
 
 VkResult BufferCache::Initialize() {
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+  VkResult status = VK_SUCCESS;
+
   VkMemoryRequirements pool_reqs;
   transient_buffer_->GetBufferMemoryRequirements(&pool_reqs);
-  gpu_memory_pool_ = device_->AllocateMemory(pool_reqs);
+  VkMemoryAllocateInfo pool_allocate_info;
+  pool_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  pool_allocate_info.pNext = nullptr;
+  pool_allocate_info.allocationSize = pool_reqs.size;
+  pool_allocate_info.memoryTypeIndex = ui::vulkan::util::ChooseHostMemoryType(
+      provider_, pool_reqs.memoryTypeBits, false);
+  if (pool_allocate_info.memoryTypeIndex == UINT32_MAX) {
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  status = dfn.vkAllocateMemory(device, &pool_allocate_info, nullptr,
+                                &gpu_memory_pool_);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
-  VkResult status = transient_buffer_->Initialize(gpu_memory_pool_, 0);
+  status = transient_buffer_->Initialize(gpu_memory_pool_, 0);
   if (status != VK_SUCCESS) {
     return status;
   }
 
   // Create a memory allocator for textures.
   VmaVulkanFunctions vulkan_funcs = {};
-  ui::vulkan::FillVMAVulkanFunctions(&vulkan_funcs);
+  ui::vulkan::FillVMAVulkanFunctions(&vulkan_funcs, provider_);
 
-  VmaAllocatorCreateInfo alloc_info = {
-      0, *device_, *device_, 0, 0, nullptr, nullptr, 0, nullptr, &vulkan_funcs,
-  };
-
+  VmaAllocatorCreateInfo alloc_info = {};
+  alloc_info.physicalDevice = provider_.physical_device();
+  alloc_info.device = device;
+  alloc_info.pVulkanFunctions = &vulkan_funcs;
+  alloc_info.instance = provider_.instance();
   status = vmaCreateAllocator(&alloc_info, &mem_allocator_);
   if (status != VK_SUCCESS) {
     return status;
@@ -144,7 +164,9 @@ VkResult BufferCache::Initialize() {
   return VK_SUCCESS;
 }
 
-VkResult xe::gpu::vulkan::BufferCache::CreateVertexDescriptorPool() {
+VkResult BufferCache::CreateVertexDescriptorPool() {
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   VkResult status;
 
   std::vector<VkDescriptorPoolSize> pool_sizes;
@@ -153,7 +175,7 @@ VkResult xe::gpu::vulkan::BufferCache::CreateVertexDescriptorPool() {
       32 * 16384,
   });
   vertex_descriptor_pool_ = std::make_unique<ui::vulkan::DescriptorPool>(
-      *device_, 32 * 16384, pool_sizes);
+      provider_, 32 * 16384, pool_sizes);
 
   // 32 storage buffers available to vertex shader.
   // TODO(DrChat): In the future, this could hold memexport staging data.
@@ -170,8 +192,8 @@ VkResult xe::gpu::vulkan::BufferCache::CreateVertexDescriptorPool() {
       1,
       &binding,
   };
-  status = vkCreateDescriptorSetLayout(*device_, &layout_info, nullptr,
-                                       &vertex_descriptor_set_layout_);
+  status = dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr,
+                                           &vertex_descriptor_set_layout_);
   if (status != VK_SUCCESS) {
     return status;
   }
@@ -179,14 +201,18 @@ VkResult xe::gpu::vulkan::BufferCache::CreateVertexDescriptorPool() {
   return VK_SUCCESS;
 }
 
-void xe::gpu::vulkan::BufferCache::FreeVertexDescriptorPool() {
+void BufferCache::FreeVertexDescriptorPool() {
   vertex_descriptor_pool_.reset();
 
-  VK_SAFE_DESTROY(vkDestroyDescriptorSetLayout, *device_,
-                  vertex_descriptor_set_layout_, nullptr);
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout,
+                                         device, vertex_descriptor_set_layout_);
 }
 
 VkResult BufferCache::CreateConstantDescriptorSet() {
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   VkResult status = VK_SUCCESS;
 
   // Descriptor pool used for all of our cached descriptors.
@@ -204,8 +230,8 @@ VkResult BufferCache::CreateConstantDescriptorSet() {
   pool_sizes[0].descriptorCount = 2;
   transient_descriptor_pool_info.poolSizeCount = 1;
   transient_descriptor_pool_info.pPoolSizes = pool_sizes;
-  status = vkCreateDescriptorPool(*device_, &transient_descriptor_pool_info,
-                                  nullptr, &constant_descriptor_pool_);
+  status = dfn.vkCreateDescriptorPool(device, &transient_descriptor_pool_info,
+                                      nullptr, &constant_descriptor_pool_);
   if (status != VK_SUCCESS) {
     return status;
   }
@@ -237,9 +263,9 @@ VkResult BufferCache::CreateConstantDescriptorSet() {
   descriptor_set_layout_info.bindingCount =
       static_cast<uint32_t>(xe::countof(bindings));
   descriptor_set_layout_info.pBindings = bindings;
-  status =
-      vkCreateDescriptorSetLayout(*device_, &descriptor_set_layout_info,
-                                  nullptr, &constant_descriptor_set_layout_);
+  status = dfn.vkCreateDescriptorSetLayout(device, &descriptor_set_layout_info,
+                                           nullptr,
+                                           &constant_descriptor_set_layout_);
   if (status != VK_SUCCESS) {
     return status;
   }
@@ -253,8 +279,8 @@ VkResult BufferCache::CreateConstantDescriptorSet() {
   set_alloc_info.descriptorPool = constant_descriptor_pool_;
   set_alloc_info.descriptorSetCount = 1;
   set_alloc_info.pSetLayouts = &constant_descriptor_set_layout_;
-  status = vkAllocateDescriptorSets(*device_, &set_alloc_info,
-                                    &constant_descriptor_set_);
+  status = dfn.vkAllocateDescriptorSets(device, &set_alloc_info,
+                                        &constant_descriptor_set_);
   if (status != VK_SUCCESS) {
     return status;
   }
@@ -286,22 +312,26 @@ VkResult BufferCache::CreateConstantDescriptorSet() {
   fragment_uniform_binding_write.descriptorType =
       VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
   fragment_uniform_binding_write.pBufferInfo = &buffer_info;
-  vkUpdateDescriptorSets(*device_, 2, descriptor_writes, 0, nullptr);
+  dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
 
   return VK_SUCCESS;
 }
 
 void BufferCache::FreeConstantDescriptorSet() {
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+
   if (constant_descriptor_set_) {
-    vkFreeDescriptorSets(*device_, constant_descriptor_pool_, 1,
-                         &constant_descriptor_set_);
+    dfn.vkFreeDescriptorSets(device, constant_descriptor_pool_, 1,
+                             &constant_descriptor_set_);
     constant_descriptor_set_ = nullptr;
   }
 
-  VK_SAFE_DESTROY(vkDestroyDescriptorSetLayout, *device_,
-                  constant_descriptor_set_layout_, nullptr);
-  VK_SAFE_DESTROY(vkDestroyDescriptorPool, *device_, constant_descriptor_pool_,
-                  nullptr);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout,
+                                         device,
+                                         constant_descriptor_set_layout_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorPool, device,
+                                         constant_descriptor_pool_);
 }
 
 void BufferCache::Shutdown() {
@@ -314,7 +344,10 @@ void BufferCache::Shutdown() {
   FreeVertexDescriptorPool();
 
   transient_buffer_->Shutdown();
-  VK_SAFE_DESTROY(vkFreeMemory, *device_, gpu_memory_pool_, nullptr);
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                         gpu_memory_pool_);
 }
 
 std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
@@ -361,9 +394,10 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
       offset,
       kConstantRegisterUniformRange,
   };
-  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 1,
-                       &barrier, 0, nullptr);
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 1,
+                           &barrier, 0, nullptr);
 
   return {offset, offset};
 
@@ -476,9 +510,10 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadIndexBuffer(
       offset,
       source_length,
   };
-  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
-                       VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1,
-                       &barrier, 0, nullptr);
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
+                           VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1,
+                           &barrier, 0, nullptr);
 
   return {transient_buffer_->gpu_buffer(), offset};
 }
@@ -498,7 +533,7 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadVertexBuffer(
   uint32_t upload_size = source_length;
 
   // Ping the memory subsystem for allocation size.
-  // TODO(DrChat): Artifacting occurring in GripShift with this enabled.
+  // TODO(DrChat): Artifacting occurring in 5841089E with this enabled.
   // physical_heap->QueryBaseAndSize(&upload_base, &upload_size);
   assert(upload_base <= source_addr);
   uint32_t source_offset = source_addr - upload_base;
@@ -543,9 +578,10 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadVertexBuffer(
       offset,
       upload_size,
   };
-  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
-                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0, nullptr, 1,
-                       &barrier, 0, nullptr);
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
+                           VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0, nullptr,
+                           1, &barrier, 0, nullptr);
 
   CacheTransientData(upload_base, upload_size, offset);
   return {transient_buffer_->gpu_buffer(), offset + source_offset};
@@ -687,7 +723,9 @@ VkDescriptorSet BufferCache::PrepareVertexSet(
     };
   }
 
-  vkUpdateDescriptorSets(*device_, 1, &descriptor_write, 0, nullptr);
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+  dfn.vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, nullptr);
   vertex_sets_[hash] = set;
   return set;
 }
@@ -760,13 +798,16 @@ void BufferCache::CacheTransientData(uint32_t guest_address,
 }
 
 void BufferCache::Flush(VkCommandBuffer command_buffer) {
+  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+
   // If we are flushing a big enough chunk queue up an event.
   // We don't want to do this for everything but often enough so that we won't
   // run out of space.
   if (true) {
     // VkEvent finish_event;
-    // vkCmdSetEvent(cmd_buffer, finish_event,
-    //              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    // dfn.vkCmdSetEvent(cmd_buffer, finish_event,
+    //                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
   }
 
   // Flush memory.
@@ -777,7 +818,7 @@ void BufferCache::Flush(VkCommandBuffer command_buffer) {
   dirty_range.memory = transient_buffer_->gpu_memory();
   dirty_range.offset = 0;
   dirty_range.size = transient_buffer_->capacity();
-  vkFlushMappedMemoryRanges(*device_, 1, &dirty_range);
+  dfn.vkFlushMappedMemoryRanges(device, 1, &dirty_range);
 }
 
 void BufferCache::InvalidateCache() {

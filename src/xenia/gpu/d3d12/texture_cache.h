@@ -24,6 +24,7 @@
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/texture_info.h"
+#include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_api.h"
 #include "xenia/ui/d3d12/d3d12_provider.h"
@@ -42,7 +43,7 @@ class D3D12CommandProcessor;
 // found in game executables explaining the valid usage of BaseAddress when
 // streaming the largest LOD (it says games should not use 0 as the base address
 // when the largest LOD isn't loaded, but rather, either allocate a valid
-// address for it or make it the same as MipAddress):
+// address for it or make it the same as mip_address):
 // - If the texture has a base address, but no mip address, it's not mipmapped -
 //   the host texture has only the largest level too.
 // - If the texture has different non-zero base address and mip address, a host
@@ -56,35 +57,41 @@ class D3D12CommandProcessor;
 //   the mip address, a mipmapped texture is created, but min/max LOD is clamped
 //   to the lower bound of 1 - the game is expected to do that anyway until the
 //   largest LOD is loaded.
-//   TODO(Triang3l): Check if there are any games with BaseAddress==MipAddress
-//   but min or max LOD being 0, especially check Modern Warfare 2/3.
-//   TODO(Triang3l): Attach the largest LOD to existing textures with a valid
-//   MipAddress but no BaseAddress to save memory because textures are streamed
-//   this way anyway.
+// TODO(Triang3l): Attach the largest LOD to existing textures with a valid
+// mip_address but no base ever used yet (no base_address) to save memory
+// because textures are streamed this way anyway.
 class TextureCache {
   struct TextureKey {
+    // Dimensions minus 1 are stored similarly to how they're stored in fetch
+    // constants so fewer bits can be used, while the maximum size (8192 for 2D)
+    // can still be encoded (a 8192x sky texture is used in 4D530910).
+
     // Physical 4 KB page with the base mip level, disregarding A/C/E address
     // range prefix.
     uint32_t base_page : 17;             // 17 total
     xenos::DataDimension dimension : 2;  // 19
-    uint32_t width : 13;                 // 32
+    uint32_t width_minus_1 : 13;         // 32
 
-    uint32_t height : 13;      // 45
-    uint32_t tiled : 1;        // 46
-    uint32_t packed_mips : 1;  // 47
+    uint32_t height_minus_1 : 13;  // 45
+    uint32_t tiled : 1;            // 46
+    uint32_t packed_mips : 1;      // 47
     // Physical 4 KB page with mip 1 and smaller.
     uint32_t mip_page : 17;  // 64
 
-    // Layers for stacked and 3D, 6 for cube, 1 for other dimensions.
-    uint32_t depth : 10;              // 74
-    uint32_t mip_max_level : 4;       // 78
-    xenos::TextureFormat format : 6;  // 84
-    xenos::Endian endianness : 2;     // 86
+    // (Layers for stacked and 3D, 6 for cube, 1 for other dimensions) - 1.
+    uint32_t depth_or_array_size_minus_1 : 10;  // 74
+    uint32_t pitch : 9;                         // 83
+    uint32_t mip_max_level : 4;                 // 87
+    xenos::TextureFormat format : 6;            // 93
+    xenos::Endian endianness : 2;               // 95
     // Whether this texture is signed and has a different host representation
     // than an unsigned view of the same guest texture.
-    uint32_t signed_separate : 1;  // 87
-    // Whether this texture is a 2x-scaled resolve target.
-    uint32_t scaled_resolve : 1;  // 88
+    uint32_t signed_separate : 1;  // 96
+
+    // Whether this texture is a resolution-scaled resolve target.
+    uint32_t scaled_resolve : 1;  // 97
+    // Least important in ==, so placed last.
+    uint32_t is_valid : 1;  // 98
 
     TextureKey() { MakeInvalid(); }
     TextureKey(const TextureKey& key) {
@@ -94,14 +101,15 @@ class TextureCache {
       std::memcpy(this, &key, sizeof(*this));
       return *this;
     }
-    bool IsInvalid() const {
-      // Zero size is enough for a binding to be invalid (not possible on the
-      // real GPU since dimensions minus 1 are stored).
-      return !width;
-    }
     void MakeInvalid() {
       // Zero everything, including the padding, for a stable hash.
       std::memset(this, 0, sizeof(*this));
+    }
+
+    uint32_t GetWidth() const { return width_minus_1 + 1; }
+    uint32_t GetHeight() const { return height_minus_1 + 1; }
+    uint32_t GetDepthOrArraySize() const {
+      return depth_or_array_size_minus_1 + 1;
     }
 
     using Hasher = xe::hash::XXHasher<TextureKey>;
@@ -123,6 +131,7 @@ class TextureCache {
   // Sampler parameters that can be directly converted to a host sampler or used
   // for binding checking validity whether samplers are up to date.
   union SamplerParameters {
+    uint32_t value;
     struct {
       xenos::ClampMode clamp_x : 3;         // 3
       xenos::ClampMode clamp_y : 3;         // 6
@@ -136,16 +145,8 @@ class TextureCache {
       uint32_t mip_min_level : 4;           // 21
       // Maximum mip level is in the texture resource itself.
     };
-    uint32_t value;
 
-    // Clearing the unused bits.
-    SamplerParameters() : value(0) {}
-    SamplerParameters(const SamplerParameters& parameters)
-        : value(parameters.value) {}
-    SamplerParameters& operator=(const SamplerParameters& parameters) {
-      value = parameters.value;
-      return *this;
-    }
+    SamplerParameters() : value(0) { static_assert_size(*this, sizeof(value)); }
     bool operator==(const SamplerParameters& parameters) const {
       return value == parameters.value;
     }
@@ -157,7 +158,8 @@ class TextureCache {
   TextureCache(D3D12CommandProcessor& command_processor,
                const RegisterFile& register_file,
                D3D12SharedMemory& shared_memory, bool bindless_resources_used,
-               uint32_t draw_resolution_scale);
+               uint32_t draw_resolution_scale_x,
+               uint32_t draw_resolution_scale_y);
   ~TextureCache();
 
   bool Initialize();
@@ -220,16 +222,20 @@ class TextureCache {
                     D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
 
   void MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled);
-  static uint32_t GetMaxDrawResolutionScale(
-      const ui::d3d12::D3D12Provider& provider) {
-    // 31 because 2 GB buffers are used.
-    if (provider.GetTiledResourcesTier() < D3D12_TILED_RESOURCES_TIER_1 ||
-        provider.GetVirtualAddressBitsPerResource() < 31) {
-      return 1;
-    }
-    return kMaxDrawResolutionScale;
+  // In textures, resolution scaling is done for 8-byte portions of memory for
+  // 8bpp textures, and for 16-byte portions for textures of higher bit depths
+  // (these are the sizes of regions where contiguous texels in memory are also
+  // contiguous in the texture along the horizontal axis, so 64-bit and 128-bit
+  // loads / stores, for 8bpp and 16bpp+ respectively, can be used for untiling
+  // regardless of the resolution scale).
+  static void ClampDrawResolutionScaleToSupportedRange(
+      uint32_t& scale_x, uint32_t& scale_y,
+      const ui::d3d12::D3D12Provider& provider);
+  uint32_t GetDrawResolutionScaleX() const { return draw_resolution_scale_x_; }
+  uint32_t GetDrawResolutionScaleY() const { return draw_resolution_scale_y_; }
+  bool IsDrawResolutionScaled() const {
+    return draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1;
   }
-  uint32_t GetDrawResolutionScale() const { return draw_resolution_scale_; }
   // Ensures the tiles backing the range in the buffers are allocated.
   bool EnsureScaledResolveMemoryCommitted(uint32_t start_unscaled,
                                           uint32_t length_unscaled);
@@ -248,7 +254,7 @@ class TextureCache {
       D3D12_CPU_DESCRIPTOR_HANDLE handle, uint32_t element_size_bytes_pow2);
   void TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATES new_state);
   void MarkCurrentScaledResolveRangeUAVWritesCommitNeeded() {
-    assert_true(draw_resolution_scale_ > 1);
+    assert_true(IsDrawResolutionScaled());
     GetCurrentScaledResolveBuffer().SetUAVBarrierPending();
   }
 
@@ -261,7 +267,11 @@ class TextureCache {
       xenos::TextureFormat& format_out);
 
  private:
-  static constexpr uint32_t kMaxDrawResolutionScale = 3;
+  // Hard limit, originating from the half-pixel offset (two-pixel offset is too
+  // much, the resolve shaders, being generic for different scales, only
+  // duplicate the second pixel into the first, not the third), and also due to
+  // the bit counts used for passing the scale to shaders.
+  static constexpr uint32_t kMaxDrawResolutionScaleAlongAxis = 3;
 
   enum class LoadMode {
     k8bpb,
@@ -282,7 +292,7 @@ class TextureCache {
     kDXT5ToRGBA8,
     kDXNToRG8,
     kDXT3A,
-    kDXT3AAs1111,
+    kDXT3AAs1111ToBGRA4,
     kDXT5AToR8,
     kCTX1,
     kDepthUnorm,
@@ -293,23 +303,102 @@ class TextureCache {
     kUnknown = kCount
   };
 
-  struct LoadShaderInfo {
+  struct LoadModeInfo {
+    // Rules of data access in load shaders:
+    // - Source reading (from the shared memory or the scaled resolve buffer):
+    //   - Guest data may be stored in a sparsely-allocated buffer, or, in
+    //     Direct3D 12 terms, a tiled buffer. This means that some regions of
+    //     the buffer may not be mapped. On tiled resources tier 1 hardware,
+    //     accesing unmapped tiles results in undefined behavior, including a
+    //     GPU page fault and device removal. So, shaders must not try to access
+    //     potentially unmapped regions (that are outside the texture memory
+    //     extents calculated on the CPU, taking into account that Xenia can't
+    //     overestimate texture sizes freely since it must not try to upload
+    //     unallocated pages on the CPU).
+    //   - Buffer tiles have 64 KB size on Direct3D 12. Vulkan has its own
+    //     alignment requirements for sparse binding. But overall, we're
+    //     allocating pretty large regions.
+    //   - Resolution scaling disabled:
+    //     - Shared memory allocates regions of power of two sizes that map
+    //       directly to the same portions of the 512 MB of the console's
+    //       physical memory. So, a 64 KB-aligned host buffer region is also 64
+    //       KB-aligned in the guest address space.
+    //     - Tiled textures: 32x32x4-block tiles are always resident each as a
+    //       whole. If the width is bigger than the pitch, the overflowing
+    //       32x32x4 tiles are also loaded as entire tiles. We do not have
+    //       separate shaders for 2D and 3D. So, for tiled textures, it's safe
+    //       to consider that if any location within a 32x32-aligned portion is
+    //       within the texture bounds, the entire 32x32 portion also can be
+    //       read.
+    //     - Linear textures: Pitch is aligned to 256 bytes. Row count, however,
+    //       is not aligned to anything (unless the mip tail is being loaded).
+    //       The overflowing last row in case `width > pitch`, however, is made
+    //       resident up to the last texel in it. But row start alignment is
+    //       256, which is a power of two, and is smaller than the Direct3D 12
+    //       tile size of 64 KB. So, if any block within a 256-aligned region is
+    //       within the texture bounds, without resolution scaling, reading from
+    //       any location in that 256-aligned region is safe.
+    //     - Since we use the same shaders for tiled and linear textures (as
+    //       well as 1D textures), this means that without resolution scaling,
+    //       it's safe to access a min(256 bytes, 32 blocks)-aligned portion
+    //       along X, but only within the same row of blocks, with bounds
+    //       checking only for such portion as a whole, but without additional
+    //       bounds checking inside of it.
+    //     - Therefore, it's recommended that shaders read power-of-two amounts
+    //       of blocks (so there will naturally be some alignment to some power
+    //       of two), and this way, each thread may read at most 16 16bpb blocks
+    //       or at most 32 8bpb or smaller blocks with in a single
+    //       `if (x < width)` for the whole aligned range of the same length.
+    //   - Resolution scaling enabled:
+    //     - For simplicity, unlike in the shared memory, buffer tile boundaries
+    //       are not aligned to powers of 2 the same way as guest addresses are.
+    //       While for 2x2 resolution scaling it still happens to be the case
+    //       because `host scaling unit address = guest scaling unit
+    //       address << 2` (similarly for 2x1 and 1x2), for 3x or x3, it's not -
+    //       a 64 KB host tile would represent 7281.777 guest bytes with 3x3
+    //       (disregarding that sequences of texels that are adjacent in memory
+    //       alongside the horizontal axis, not individual bytes, are scaled,
+    //       but even in that case it's not scaling by 2^n still).
+    //     - The above would affect the `width > pitch` case for linear
+    //       textures, requiring overestimating the width in calculation of the
+    //       range of the tiles to map, while not doing this overestimation on
+    //       the guest memory extent calculation side (otherwise it may result
+    //       in attempting to upload unallocated memory on the CPU). For
+    //       example, let's take look at an extreme case of a 369x28 k_8 texture
+    //       with pitch of 256 bytes. The last row, in guest memory, would be
+    //       loaded from the [7168, 7281) range, or, with 3x3 resolution
+    //       scaling, from bytes [64512, 65529). However, if we try to
+    //       unconditionally load 2 pixels, like the texture is 370x28, we will
+    //       be accessing the bytes [64512, 65538). But bytes 65536 and 65537
+    //       will be in another 64 KB tile, which may be not mapped yet.
+    //       However, none of this is an issue for one simple reason - resolving
+    //       is only possible to tiled textures, so linear textures will never
+    //       be resolution-scaled.
+    //     - Tiled textures have potentially referenced guest 32x32-block tiles
+    //       loaded in their entirety. So, just like for unscaled textures, if
+    //       any block within a tile is available, the entire tile is as well.
+    // - Destination writing (to the linear buffer):
+    //   - host_x_blocks_per_thread specifies how many pixels can be written
+    //     without bounds checking within increments of that amount - the pitch
+    //     of the destination buffer is manually overaligned if needed.
+    // Shader without resolution scaling.
     const void* shader;
     size_t shader_size;
+    // Shader with resolution scaling, if available. These shaders are separate
+    // so the majority of the textures are not affected by the code needed for
+    // resolution scale support, and also to check if the format allows
+    // resolution scaling.
+    const void* shader_scaled;
+    size_t shader_scaled_size;
     // Log2 of the sizes, in bytes, of the source (guest) SRV and the
     // destination (host) UAV accessed by the copying shader, since the shader
     // may copy multiple blocks per one invocation.
     uint32_t srv_bpe_log2;
     uint32_t uav_bpe_log2;
-    // Number of guest blocks (or texels for uncompressed) along X axis written
+    // Number of host blocks (or texels for uncompressed) along X axis written
     // by every compute shader thread - rows in the upload buffer are padded to
     // at least this amount.
     uint32_t host_x_blocks_per_thread;
-  };
-
-  struct LoadModeInfo {
-    // For different drawing resolution scales.
-    LoadShaderInfo shaders[kMaxDrawResolutionScale];
   };
 
   struct HostFormat {
@@ -342,7 +431,7 @@ class TextureCache {
     // Uncompression info for when the regular host format for this texture is
     // block-compressed, but the size is not block-aligned, and thus such
     // texture cannot be created in Direct3D on PC and needs decompression,
-    // however, such textures are common, for instance, in Halo 3. This only
+    // however, such textures are common, for instance, in 4D5307E6. This only
     // supports unsigned normalized formats - let's hope GPUSIGN_SIGNED was not
     // used for DXN and DXT5A.
     DXGI_FORMAT dxgi_format_uncompressed;
@@ -369,18 +458,7 @@ class TextureCache {
     Texture* used_previous;
     Texture* used_next;
 
-    // Byte size of the top guest mip level.
-    uint32_t base_size;
-    // Byte size of mips between 1 and key.mip_max_level, containing all array
-    // slices.
-    uint32_t mip_size;
-    // Offsets of all the array slices on a mip level relative to mips_address
-    // (0 for mip 0, it's relative to base_address then, and for mip 1).
-    uint32_t mip_offsets[14];
-    // Byte sizes of an array slice on each mip level.
-    uint32_t slice_sizes[14];
-    // Row pitches on each mip level (for linear layout mainly).
-    uint32_t pitches[14];
+    texture_util::TextureGuestLayout guest_layout;
 
     // For bindful - indices in the non-shader-visible descriptor cache for
     // copying to the shader-visible heap (much faster than recreating, which,
@@ -399,6 +477,12 @@ class TextureCache {
     bool mips_in_sync;
 
     bool IsResolved() const { return base_resolved || mips_resolved; }
+    uint32_t GetGuestBaseSize() const {
+      return guest_layout.base.level_data_extent_bytes;
+    }
+    uint32_t GetGuestMipsSize() const {
+      return guest_layout.mips_total_extent_bytes;
+    }
   };
 
   struct SRVDescriptorCachePage {
@@ -409,24 +493,25 @@ class TextureCache {
 
   struct LoadConstants {
     // vec4 0.
-    // Base offset in bytes.
-    uint32_t guest_base;
-    // For linear textures - row byte pitch.
-    uint32_t guest_pitch;
-    // In blocks - and for mipmaps, it's also power-of-two-aligned.
-    uint32_t guest_storage_width_height[2];
+    uint32_t is_tiled_3d_endian_scale;
+    // Base offset in bytes, resolution-scaled.
+    uint32_t guest_offset;
+    // For tiled textures - row pitch in blocks, aligned to 32, unscaled.
+    // For linear textures - row pitch in bytes.
+    uint32_t guest_pitch_aligned;
+    // For 3D textures only (ignored otherwise) - aligned to 32, unscaled.
+    uint32_t guest_z_stride_block_rows_aligned;
 
     // vec4 1.
+    // If this is a packed mip tail, this is aligned to tile dimensions.
+    // Resolution-scaled.
     uint32_t size_blocks[3];
-    uint32_t is_3d_endian;
+    // Base offset in bytes.
+    uint32_t host_offset;
 
     // vec4 2.
-    // Base offset in bytes.
-    uint32_t host_base;
     uint32_t host_pitch;
     uint32_t height_texels;
-
-    static constexpr uint32_t kGuestPitchTiled = UINT32_MAX;
   };
 
   struct TextureBinding {
@@ -466,7 +551,8 @@ class TextureCache {
         return 0;
     }
   }
-  static uint32_t GetMaxHostTextureDepth(xenos::DataDimension dimension) {
+  static uint32_t GetMaxHostTextureDepthOrArraySize(
+      xenos::DataDimension dimension) {
     switch (dimension) {
       case xenos::DataDimension::k1D:
       case xenos::DataDimension::k2DOrStacked:
@@ -531,7 +617,7 @@ class TextureCache {
                : host_format.dxgi_format_resource;
   }
   static DXGI_FORMAT GetDXGIResourceFormat(TextureKey key) {
-    return GetDXGIResourceFormat(key.format, key.width, key.height);
+    return GetDXGIResourceFormat(key.format, key.GetWidth(), key.GetHeight());
   }
   static DXGI_FORMAT GetDXGIUnormFormat(xenos::TextureFormat format,
                                         uint32_t width, uint32_t height) {
@@ -541,7 +627,7 @@ class TextureCache {
                : host_format.dxgi_format_unorm;
   }
   static DXGI_FORMAT GetDXGIUnormFormat(TextureKey key) {
-    return GetDXGIUnormFormat(key.format, key.width, key.height);
+    return GetDXGIUnormFormat(key.format, key.GetWidth(), key.GetHeight());
   }
 
   static LoadMode GetLoadMode(TextureKey key);
@@ -607,7 +693,7 @@ class TextureCache {
   void ClearBindings();
 
   size_t GetScaledResolveBufferCount() const {
-    assert_true(draw_resolution_scale_ > 1);
+    assert_true(IsDrawResolutionScaled());
     // Make sure any range up to 1 GB is accessible through 1 or 2 buffers.
     // 2x2 scale buffers - just one 2 GB buffer for all 2 GB.
     // 3x3 scale buffers - 4 buffers:
@@ -623,7 +709,7 @@ class TextureCache {
     //   three buffers.
     uint64_t address_space_size =
         uint64_t(SharedMemory::kBufferSize) *
-        (draw_resolution_scale_ * draw_resolution_scale_);
+        (draw_resolution_scale_x_ * draw_resolution_scale_y_);
     return size_t((address_space_size - 1) >> 30);
   }
   // Returns indices of two scaled resolve virtual buffers that the location in
@@ -631,7 +717,7 @@ class TextureCache {
   // the beginning or the end of the address represented only by one buffer.
   std::array<size_t, 2> GetPossibleScaledResolveBufferIndices(
       uint64_t address_scaled) const {
-    assert_true(draw_resolution_scale_ > 1);
+    assert_true(IsDrawResolutionScaled());
     size_t address_gb = size_t(address_scaled >> 30);
     size_t max_index = GetScaledResolveBufferCount() - 1;
     // In different cases for 3x3:
@@ -724,11 +810,12 @@ class TextureCache {
   };
   uint8_t unsupported_format_features_used_[64];
 
-  uint32_t draw_resolution_scale_ = 1;
+  uint32_t draw_resolution_scale_x_ = 1;
+  uint32_t draw_resolution_scale_y_ = 1;
   // The tiled buffer for resolved data with resolution scaling.
   // Because on Direct3D 12 (at least on Windows 10 2004) typed SRV or UAV
   // creation fails for offsets above 4 GB, a single tiled 4.5 GB buffer can't
-  // be used for 3x resolution scaling.
+  // be used for 3x3 resolution scaling.
   // Instead, "sliding window" buffers allowing to access a single range of up
   // to 1 GB (or up to 2 GB, depending on the low bits) at any moment are used.
   // Parts of 4.5 GB address space can be accessed through 2 GB buffers as:
@@ -743,8 +830,8 @@ class TextureCache {
   // Size is calculated the same as in GetScaledResolveBufferCount.
   ScaledResolveVirtualBuffer*
       scaled_resolve_2gb_buffers_[(uint64_t(SharedMemory::kBufferSize) *
-                                       (kMaxDrawResolutionScale *
-                                        kMaxDrawResolutionScale) -
+                                       (kMaxDrawResolutionScaleAlongAxis *
+                                        kMaxDrawResolutionScaleAlongAxis) -
                                    1) >>
                                   30] = {};
   // Not very big heaps (16 MB) because they are needed pretty sparsely. One
@@ -774,8 +861,8 @@ class TextureCache {
   // For aliasing barrier placement, last owning buffer index for each of 1 GB.
   size_t
       scaled_resolve_1gb_buffer_indices_[(uint64_t(SharedMemory::kBufferSize) *
-                                              kMaxDrawResolutionScale *
-                                              kMaxDrawResolutionScale +
+                                              kMaxDrawResolutionScaleAlongAxis *
+                                              kMaxDrawResolutionScaleAlongAxis +
                                           ((uint32_t(1) << 30) - 1)) >>
                                          30];
   // Range used in the last successful MakeScaledResolveRangeCurrent call.

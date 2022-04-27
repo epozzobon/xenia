@@ -1,8 +1,8 @@
-/**
+﻿/**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -2354,21 +2354,39 @@ EMITTER_OPCODE_TABLE(OPCODE_SQRT, SQRT_F32, SQRT_F64, SQRT_V128);
 // ============================================================================
 // OPCODE_RSQRT
 // ============================================================================
+// Altivec guarantees an error of < 1/4096 for vrsqrtefp while AVX only gives
+// < 1.5*2^-12 ≈ 1/2730 for vrsqrtps.
 struct RSQRT_F32 : Sequence<RSQRT_F32, I<OPCODE_RSQRT, F32Op, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vrsqrtss(i.dest, i.src1);
+    if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
+      e.vrsqrt14ss(i.dest, i.src1, i.src1);
+    } else {
+      e.vmovaps(e.xmm0, e.GetXmmConstPtr(XMMOne));
+      e.vsqrtss(e.xmm1, i.src1, i.src1);
+      e.vdivss(i.dest, e.xmm0, e.xmm1);
+    }
   }
 };
 struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vcvtsd2ss(i.dest, i.src1);
-    e.vrsqrtss(i.dest, i.dest);
-    e.vcvtss2sd(i.dest, i.dest);
+    if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
+      e.vrsqrt14sd(i.dest, i.src1, i.src1);
+    } else {
+      e.vmovapd(e.xmm0, e.GetXmmConstPtr(XMMOnePD));
+      e.vsqrtsd(e.xmm1, i.src1, i.src1);
+      e.vdivsd(i.dest, e.xmm0, e.xmm1);
+    }
   }
 };
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vrsqrtps(i.dest, i.src1);
+    if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
+      e.vrsqrt14ps(i.dest, i.src1);
+    } else {
+      e.vmovaps(e.xmm0, e.GetXmmConstPtr(XMMOne));
+      e.vsqrtps(e.xmm1, i.src1);
+      e.vdivps(i.dest, e.xmm0, e.xmm1);
+    }
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RSQRT, RSQRT_F32, RSQRT_F64, RSQRT_V128);
@@ -2376,21 +2394,37 @@ EMITTER_OPCODE_TABLE(OPCODE_RSQRT, RSQRT_F32, RSQRT_F64, RSQRT_V128);
 // ============================================================================
 // OPCODE_RECIP
 // ============================================================================
+// Altivec guarantees an error of < 1/4096 for vrefp while AVX only gives
+// < 1.5*2^-12 ≈ 1/2730 for rcpps. This breaks camp, horse and random event
+// spawning, breaks cactus collision as well as flickering grass in 5454082B
 struct RECIP_F32 : Sequence<RECIP_F32, I<OPCODE_RECIP, F32Op, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vrcpss(i.dest, i.src1);
+    if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
+      e.vrcp14ss(i.dest, i.src1, i.src1);
+    } else {
+      e.vmovaps(e.xmm0, e.GetXmmConstPtr(XMMOne));
+      e.vdivss(i.dest, e.xmm0, i.src1);
+    }
   }
 };
 struct RECIP_F64 : Sequence<RECIP_F64, I<OPCODE_RECIP, F64Op, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vcvtsd2ss(i.dest, i.src1);
-    e.vrcpss(i.dest, i.dest);
-    e.vcvtss2sd(i.dest, i.dest);
+    if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
+      e.vrcp14sd(i.dest, i.src1, i.src1);
+    } else {
+      e.vmovapd(e.xmm0, e.GetXmmConstPtr(XMMOnePD));
+      e.vdivsd(i.dest, e.xmm0, i.src1);
+    }
   }
 };
 struct RECIP_V128 : Sequence<RECIP_V128, I<OPCODE_RECIP, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vrcpps(i.dest, i.src1);
+    if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
+      e.vrcp14ps(i.dest, i.src1);
+    } else {
+      e.vmovaps(e.xmm0, e.GetXmmConstPtr(XMMOne));
+      e.vdivps(i.dest, e.xmm0, i.src1);
+    }
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RECIP, RECIP_F32, RECIP_F64, RECIP_V128);
@@ -2626,6 +2660,115 @@ struct AND_V128 : Sequence<AND_V128, I<OPCODE_AND, V128Op, V128Op, V128Op>> {
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_AND, AND_I8, AND_I16, AND_I32, AND_I64, AND_V128);
+
+// ============================================================================
+// OPCODE_AND_NOT
+// ============================================================================
+template <typename SEQ, typename REG, typename ARGS>
+void EmitAndNotXX(X64Emitter& e, const ARGS& i) {
+  if (i.src1.is_constant) {
+    if (i.src2.is_constant) {
+      // Both constants.
+      e.mov(i.dest, i.src1.constant() & ~i.src2.constant());
+    } else {
+      // src1 constant.
+
+      // `and` instruction only supports up to 32-bit immediate constants
+      // 64-bit constants will need a temp register
+      if (i.dest.reg().getBit() == 64) {
+        auto temp = GetTempReg<typename decltype(i.src1)::reg_type>(e);
+        e.mov(temp, i.src1.constant());
+
+        if (e.IsFeatureEnabled(kX64EmitBMI1)) {
+          if (i.dest.reg().getBit() == 64) {
+            e.andn(i.dest.reg().cvt64(), i.src2.reg().cvt64(), temp.cvt64());
+          } else {
+            e.andn(i.dest.reg().cvt32(), i.src2.reg().cvt32(), temp.cvt32());
+          }
+        } else {
+          e.mov(i.dest, i.src2);
+          e.not_(i.dest);
+          e.and_(i.dest, temp);
+        }
+      } else {
+        e.mov(i.dest, i.src2);
+        e.not_(i.dest);
+        e.and_(i.dest, uint32_t(i.src1.constant()));
+      }
+    }
+  } else if (i.src2.is_constant) {
+    // src2 constant.
+    if (i.dest == i.src1) {
+      auto temp = GetTempReg<typename decltype(i.src2)::reg_type>(e);
+      e.mov(temp, ~i.src2.constant());
+      e.and_(i.dest, temp);
+    } else {
+      e.mov(i.dest, i.src1);
+      auto temp = GetTempReg<typename decltype(i.src2)::reg_type>(e);
+      e.mov(temp, ~i.src2.constant());
+      e.and_(i.dest, temp);
+    }
+  } else {
+    // neither are constant
+    if (e.IsFeatureEnabled(kX64EmitBMI1)) {
+      if (i.dest.reg().getBit() == 64) {
+        e.andn(i.dest.reg().cvt64(), i.src2.reg().cvt64(),
+               i.src1.reg().cvt64());
+      } else {
+        e.andn(i.dest.reg().cvt32(), i.src2.reg().cvt32(),
+               i.src1.reg().cvt32());
+      }
+    } else {
+      if (i.dest == i.src2) {
+        e.not_(i.dest);
+        e.and_(i.dest, i.src1);
+      } else if (i.dest == i.src1) {
+        auto temp = GetTempReg<typename decltype(i.dest)::reg_type>(e);
+        e.mov(temp, i.src2);
+        e.not_(temp);
+        e.and_(i.dest, temp);
+      } else {
+        e.mov(i.dest, i.src2);
+        e.not_(i.dest);
+        e.and_(i.dest, i.src1);
+      }
+    }
+  }
+}
+struct AND_NOT_I8 : Sequence<AND_NOT_I8, I<OPCODE_AND_NOT, I8Op, I8Op, I8Op>> {
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    EmitAndNotXX<AND_NOT_I8, Reg8>(e, i);
+  }
+};
+struct AND_NOT_I16
+    : Sequence<AND_NOT_I16, I<OPCODE_AND_NOT, I16Op, I16Op, I16Op>> {
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    EmitAndNotXX<AND_NOT_I16, Reg16>(e, i);
+  }
+};
+struct AND_NOT_I32
+    : Sequence<AND_NOT_I32, I<OPCODE_AND_NOT, I32Op, I32Op, I32Op>> {
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    EmitAndNotXX<AND_NOT_I32, Reg32>(e, i);
+  }
+};
+struct AND_NOT_I64
+    : Sequence<AND_NOT_I64, I<OPCODE_AND_NOT, I64Op, I64Op, I64Op>> {
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    EmitAndNotXX<AND_NOT_I64, Reg64>(e, i);
+  }
+};
+struct AND_NOT_V128
+    : Sequence<AND_NOT_V128, I<OPCODE_AND_NOT, V128Op, V128Op, V128Op>> {
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    EmitCommutativeBinaryXmmOp(e, i,
+                               [](X64Emitter& e, Xmm dest, Xmm src1, Xmm src2) {
+                                 e.vpandn(dest, src2, src1);
+                               });
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_AND_NOT, AND_NOT_I8, AND_NOT_I16, AND_NOT_I32,
+                     AND_NOT_I64, AND_NOT_V128);
 
 // ============================================================================
 // OPCODE_OR

@@ -13,7 +13,7 @@
 #include <string>
 
 #include "xenia/gpu/shader.h"
-#include "xenia/ui/vulkan/vulkan_context.h"
+#include "xenia/ui/vulkan/vulkan_provider.h"
 
 namespace xe {
 namespace gpu {
@@ -36,15 +36,16 @@ class VulkanShader : public Shader {
     VkShaderModule shader_module_ = nullptr;
   };
 
-  VulkanShader(ui::vulkan::VulkanDevice* device, xenos::ShaderType shader_type,
-               uint64_t data_hash, const uint32_t* dword_ptr,
-               uint32_t dword_count);
+  VulkanShader(const ui::vulkan::VulkanProvider& provider,
+               xenos::ShaderType shader_type, uint64_t ucode_data_hash,
+               const uint32_t* ucode_dwords, size_t ucode_dword_count,
+               std::endian ucode_source_endian = std::endian::big);
 
  protected:
   Translation* CreateTranslationInstance(uint64_t modification) override;
 
  private:
-  ui::vulkan::VulkanDevice* device_ = nullptr;
+  const ui::vulkan::VulkanProvider& provider_;
 };
 
 }  // namespace vulkan

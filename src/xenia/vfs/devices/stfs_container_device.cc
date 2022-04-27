@@ -30,9 +30,9 @@ namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 // xboxkrnl_xekeys.cc
-dword_result_t XeKeysConsolePrivateKeySign(
+dword_result_t XeKeysConsolePrivateKeySign_entry(
     lpvoid_t hash, pointer_t<X_XE_CONSOLE_SIGNATURE> output_cert_sig);
-dword_result_t XeKeysGetConsoleID(lpvoid_t raw_bytes, lpvoid_t hex_string);
+dword_result_t XeKeysGetConsoleID_entry(lpvoid_t raw_bytes, lpvoid_t hex_string);
 }  // namespace xboxkrnl
 }  // namespace kernel
 
@@ -703,7 +703,7 @@ bool StfsContainerDevice::STFSFlush() {
 
   // Update misc metadata
 
-  kernel::xboxkrnl::XeKeysGetConsoleID(header_.metadata.console_id, nullptr);
+  kernel::xboxkrnl::XeKeysGetConsoleID_entry(header_.metadata.console_id, nullptr);
 
   header_.metadata.profile_id = kernel::kernel_state()->user_profile()->xuid();
 
@@ -891,7 +891,7 @@ bool StfsContainerDevice::STFSFlush() {
   XELOGD(" - Profile ID:     {:016X}", header_.metadata.profile_id);
   XELOGD(" - Device ID:      {}", device_id.to_string());
 
-  xe::kernel::xboxkrnl::XeKeysConsolePrivateKeySign(
+  xe::kernel::xboxkrnl::XeKeysConsolePrivateKeySign_entry(
       header_hash, &header_.header.signature.console);
 
   xe::filesystem::Seek(package_file, 0, SEEK_SET);

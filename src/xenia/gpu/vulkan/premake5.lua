@@ -8,7 +8,6 @@ project("xenia-gpu-vulkan")
   language("C++")
   links({
     "fmt",
-    "volk",
     "xenia-base",
     "xenia-gpu",
     "xenia-ui",
@@ -16,11 +15,12 @@ project("xenia-gpu-vulkan")
     "xenia-ui-vulkan",
     "xxhash",
   })
-  defines({
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   local_platform_files()
   files({
-    "shaders/bin/*.h",
+    "shaders/bytecode/vulkan_spirv/*.h",
   })
 
 -- TODO(benvanik): kill this and move to the debugger UI.
@@ -57,14 +57,14 @@ project("xenia-gpu-vulkan-trace-viewer")
     "mspack",
     "snappy",
     "spirv-tools",
-    "volk",
     "xxhash",
   })
-  defines({
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   files({
     "vulkan_trace_viewer_main.cc",
-    "../../base/main_"..platform_suffix..".cc",
+    "../../ui/windowed_app_main_"..platform_suffix..".cc",
   })
 
   filter("platforms:Linux")
@@ -72,8 +72,6 @@ project("xenia-gpu-vulkan-trace-viewer")
       "X11",
       "xcb",
       "X11-xcb",
-      "GL",
-      "vulkan",
     })
 
   filter("platforms:Windows")
@@ -126,14 +124,14 @@ project("xenia-gpu-vulkan-trace-dump")
     "mspack",
     "snappy",
     "spirv-tools",
-    "volk",
     "xxhash",
   })
-  defines({
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   files({
     "vulkan_trace_dump_main.cc",
-    "../../base/main_"..platform_suffix..".cc",
+    "../../base/console_app_main_"..platform_suffix..".cc",
   })
 
   filter("platforms:Linux")
@@ -141,8 +139,6 @@ project("xenia-gpu-vulkan-trace-dump")
       "X11",
       "xcb",
       "X11-xcb",
-      "GL",
-      "vulkan",
     })
 
   filter("platforms:Windows")

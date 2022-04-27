@@ -9,6 +9,7 @@
 
 #include "xenia/emulator.h"
 
+#include <algorithm>
 #include <cinttypes>
 
 #include "config.h"
@@ -20,9 +21,9 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/exception_handler.h"
+#include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
-#include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
@@ -40,8 +41,12 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/memory.h"
 #include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/host_path_device.h"
+#include "xenia/vfs/devices/null_device.h"
 #include "xenia/vfs/devices/stfs_container_device.h"
 #include "xenia/vfs/virtual_file_system.h"
 
@@ -56,6 +61,17 @@ DEFINE_string(
     "General");
 
 namespace xe {
+
+using namespace xe::literals;
+
+Emulator::GameConfigLoadCallback::GameConfigLoadCallback(Emulator& emulator)
+    : emulator_(emulator) {
+  emulator_.AddGameConfigLoadCallback(this);
+}
+
+Emulator::GameConfigLoadCallback::~GameConfigLoadCallback() {
+  emulator_.RemoveGameConfigLoadCallback(this);
+}
 
 Emulator::Emulator(const std::filesystem::path& command_line,
                    const std::filesystem::path& storage_root,
@@ -110,7 +126,7 @@ Emulator::~Emulator() {
 }
 
 X_STATUS Emulator::Setup(
-    ui::Window* display_window,
+    ui::Window* display_window, ui::ImGuiDrawer* imgui_drawer,
     std::function<std::unique_ptr<apu::AudioSystem>(cpu::Processor*)>
         audio_system_factory,
     std::function<std::unique_ptr<gpu::GraphicsSystem>()>
@@ -120,6 +136,7 @@ X_STATUS Emulator::Setup(
   X_STATUS result = X_STATUS_UNSUCCESSFUL;
 
   display_window_ = display_window;
+  imgui_drawer_ = imgui_drawer;
 
   // Initialize clock.
   // 360 uses a 50MHz clock.
@@ -206,8 +223,10 @@ X_STATUS Emulator::Setup(
   kernel_state_ = std::make_unique<xe::kernel::KernelState>(this);
 
   // Setup the core components.
-  result = graphics_system_->Setup(processor_.get(), kernel_state_.get(),
-                                   display_window_);
+  result = graphics_system_->Setup(
+      processor_.get(), kernel_state_.get(),
+      display_window_ ? &display_window_->app_context() : nullptr,
+      display_window_ != nullptr);
   if (result) {
     return result;
   }
@@ -229,14 +248,6 @@ X_STATUS Emulator::Setup(
 
   // Initialize emulator fallback exception handling last.
   ExceptionHandler::Install(Emulator::ExceptionCallbackThunk, this);
-
-  if (display_window_) {
-    // Finish initializing the display.
-    display_window_->loop()->PostSynchronous([this]() {
-      xe::ui::GraphicsContextLock context_lock(display_window_->context());
-      Profiler::set_window(display_window_);
-    });
-  }
 
   return result;
 }
@@ -279,7 +290,7 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // and then get that symlinked to game:\, so
   // -> game:\foo.xex
 
-  auto mount_path = "\\Device\\Harddisk0\\Partition0";
+  auto mount_path = "\\Device\\Harddisk0\\Partition1";
 
   // Register the local directory in the virtual filesystem.
   auto parent_path = path.parent_path();
@@ -411,16 +422,15 @@ void Emulator::Resume() {
 bool Emulator::SaveToFile(const std::filesystem::path& path) {
   Pause();
 
-  filesystem::CreateFile(path);
-  auto map = MappedMemory::Open(path, MappedMemory::Mode::kReadWrite, 0,
-                                1024ull * 1024ull * 1024ull * 2ull);
+  filesystem::CreateEmptyFile(path);
+  auto map = MappedMemory::Open(path, MappedMemory::Mode::kReadWrite, 0, 2_GiB);
   if (!map) {
     return false;
   }
 
   // Save the emulator state to a file
   ByteStream stream(map->data(), map->size());
-  stream.Write('XSAV');
+  stream.Write(kEmulatorSaveSignature);
   stream.Write(title_id_.has_value());
   if (title_id_.has_value()) {
     stream.Write(title_id_.value());
@@ -454,7 +464,7 @@ bool Emulator::RestoreFromFile(const std::filesystem::path& path) {
 
   auto lock = global_critical_region::AcquireDirect();
   ByteStream stream(map->data(), map->size());
-  if (stream.Read<uint32_t>() != 'XSAV') {
+  if (stream.Read<uint32_t>() != kEmulatorSaveSignature) {
     return false;
   }
 
@@ -582,14 +592,16 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   }
 
   // Display a dialog telling the user the guest has crashed.
-  display_window()->loop()->PostSynchronous([&]() {
-    xe::ui::ImGuiDialog::ShowMessageBox(
-        display_window(), "Uh-oh!",
-        "The guest has crashed.\n\n"
-        ""
-        "Xenia has now paused itself.\n"
-        "A crash dump has been written into the log.");
-  });
+  if (display_window_ && imgui_drawer_) {
+    display_window_->app_context().CallInUIThreadSynchronous([this]() {
+      xe::ui::ImGuiDialog::ShowMessageBox(
+          imgui_drawer_, "Uh-oh!",
+          "The guest has crashed.\n\n"
+          ""
+          "Xenia has now paused itself.\n"
+          "A crash dump has been written into the log.");
+    });
+  }
 
   // Now suspend ourself (we should be a guest thread).
   current_thread->Suspend(nullptr);
@@ -614,6 +626,41 @@ void Emulator::WaitUntilExit() {
   }
 
   on_exit();
+}
+
+void Emulator::AddGameConfigLoadCallback(GameConfigLoadCallback* callback) {
+  assert_not_null(callback);
+  // Game config load callbacks handling is entirely in the UI thread.
+  assert_true(!display_window_ ||
+              display_window_->app_context().IsInUIThread());
+  // Check if already added.
+  if (std::find(game_config_load_callbacks_.cbegin(),
+                game_config_load_callbacks_.cend(),
+                callback) != game_config_load_callbacks_.cend()) {
+    return;
+  }
+  game_config_load_callbacks_.push_back(callback);
+}
+
+void Emulator::RemoveGameConfigLoadCallback(GameConfigLoadCallback* callback) {
+  assert_not_null(callback);
+  // Game config load callbacks handling is entirely in the UI thread.
+  assert_true(!display_window_ ||
+              display_window_->app_context().IsInUIThread());
+  auto it = std::find(game_config_load_callbacks_.cbegin(),
+                      game_config_load_callbacks_.cend(), callback);
+  if (it == game_config_load_callbacks_.cend()) {
+    return;
+  }
+  if (game_config_load_callback_loop_next_index_ != SIZE_MAX) {
+    // Actualize the next callback index after the erasure from the vector.
+    size_t existing_index =
+        size_t(std::distance(game_config_load_callbacks_.cbegin(), it));
+    if (game_config_load_callback_loop_next_index_ > existing_index) {
+      --game_config_load_callback_loop_next_index_;
+    }
+  }
+  game_config_load_callbacks_.erase(it);
 }
 
 std::string Emulator::FindLaunchModule() {
@@ -672,6 +719,29 @@ static std::string format_version(xex2_version version) {
 
 X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
+  // Making changes to the UI (setting the icon) and executing game config load
+  // callbacks which expect to be called from the UI thread.
+  assert_true(display_window_->app_context().IsInUIThread());
+
+  // Setup NullDevices for raw HDD partition accesses
+  // Cache/STFC code baked into games tries reading/writing to these
+  // By using a NullDevice that just returns success to all IO requests it
+  // should allow games to believe cache/raw disk was accessed successfully
+
+  // NOTE: this should probably be moved to xenia_main.cc, but right now we need
+  // to register the \Device\Harddisk0\ NullDevice _after_ the
+  // \Device\Harddisk0\Partition1 HostPathDevice, otherwise requests to
+  // Partition1 will go to this. Registering during CompleteLaunch allows us to
+  // make sure any HostPathDevices are ready beforehand.
+  // (see comment above cache:\ device registration for more info about why)
+  auto null_paths = {std::string("\\Partition0"), std::string("\\Cache0"),
+                     std::string("\\Cache1")};
+  auto null_device =
+      std::make_unique<vfs::NullDevice>("\\Device\\Harddisk0", null_paths);
+  if (null_device->Initialize()) {
+    file_system_->RegisterDevice(std::move(null_device));
+  }
+
   // Reset state.
   title_id_ = std::nullopt;
   title_name_ = "";
@@ -699,6 +769,43 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     auto title_version = info->version();
     if (title_version.value != 0) {
       title_version_ = format_version(title_version);
+    }
+  }
+
+  // Try and load the resource database (xex only).
+  if (module->title_id()) {
+    auto title_id = fmt::format("{:08X}", module->title_id());
+
+    // Load the per-game configuration file and make sure updates are handled by
+    // the callbacks.
+    config::LoadGameConfig(title_id);
+    assert_true(game_config_load_callback_loop_next_index_ == SIZE_MAX);
+    game_config_load_callback_loop_next_index_ = 0;
+    while (game_config_load_callback_loop_next_index_ <
+           game_config_load_callbacks_.size()) {
+      game_config_load_callbacks_[game_config_load_callback_loop_next_index_++]
+          ->PostGameConfigLoad();
+    }
+    game_config_load_callback_loop_next_index_ = SIZE_MAX;
+
+    uint32_t resource_data = 0;
+    uint32_t resource_size = 0;
+    if (XSUCCEEDED(module->GetSection(title_id.c_str(), &resource_data,
+                                      &resource_size))) {
+      kernel::util::XdbfGameData db(
+          module->memory()->TranslateVirtual(resource_data), resource_size);
+      if (db.is_valid()) {
+        // TODO(gibbed): get title respective to user locale.
+        title_name_ = db.title(XLanguage::kEnglish);
+        if (title_name_.empty()) {
+          // If English title is unavailable, get the title in default locale.
+          title_name_ = db.title();
+        }
+        auto icon_block = db.icon();
+        if (icon_block) {
+          display_window_->SetIcon(icon_block.buffer, icon_block.size);
+        }
+      }
     }
   }
 

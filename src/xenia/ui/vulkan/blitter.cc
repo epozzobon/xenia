@@ -10,63 +10,65 @@
 #include "xenia/ui/vulkan/blitter.h"
 #include "xenia/base/math.h"
 #include "xenia/ui/vulkan/fenced_pools.h"
+#include "xenia/ui/vulkan/vulkan_util.h"
 
 namespace xe {
 namespace ui {
 namespace vulkan {
 
-// Generated with `xenia-build genspirv`.
-#include "xenia/ui/vulkan/shaders/bin/blit_color_frag.h"
-#include "xenia/ui/vulkan/shaders/bin/blit_depth_frag.h"
-#include "xenia/ui/vulkan/shaders/bin/blit_vert.h"
+using util::CheckResult;
 
-Blitter::Blitter() {}
+// Generated with `xb buildshaders`.
+namespace shaders {
+#include "xenia/ui/vulkan/shaders/bytecode/vulkan_spirv/blit_color_ps.h"
+#include "xenia/ui/vulkan/shaders/bytecode/vulkan_spirv/blit_depth_ps.h"
+#include "xenia/ui/vulkan/shaders/bytecode/vulkan_spirv/blit_vs.h"
+}  // namespace shaders
+
+Blitter::Blitter(const VulkanProvider& provider) : provider_(provider) {}
 Blitter::~Blitter() { Shutdown(); }
 
-VkResult Blitter::Initialize(VulkanDevice* device) {
-  device_ = device;
-
+VkResult Blitter::Initialize() {
+  const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   VkResult status = VK_SUCCESS;
 
   // Shaders
   VkShaderModuleCreateInfo shader_create_info;
   std::memset(&shader_create_info, 0, sizeof(shader_create_info));
   shader_create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  shader_create_info.codeSize = sizeof(blit_vert);
-  shader_create_info.pCode = reinterpret_cast<const uint32_t*>(blit_vert);
-  status = vkCreateShaderModule(*device_, &shader_create_info, nullptr,
-                                &blit_vertex_);
+  shader_create_info.codeSize = sizeof(shaders::blit_vs);
+  shader_create_info.pCode = shaders::blit_vs;
+  status = dfn.vkCreateShaderModule(device, &shader_create_info, nullptr,
+                                    &blit_vertex_);
   CheckResult(status, "vkCreateShaderModule");
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(blit_vertex_),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(B): Vertex");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(blit_vertex_), "S(B): Vertex");
 
-  shader_create_info.codeSize = sizeof(blit_color_frag);
-  shader_create_info.pCode = reinterpret_cast<const uint32_t*>(blit_color_frag);
-  status = vkCreateShaderModule(*device_, &shader_create_info, nullptr,
-                                &blit_color_);
+  shader_create_info.codeSize = sizeof(shaders::blit_color_ps);
+  shader_create_info.pCode = shaders::blit_color_ps;
+  status = dfn.vkCreateShaderModule(device, &shader_create_info, nullptr,
+                                    &blit_color_);
   CheckResult(status, "vkCreateShaderModule");
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(blit_color_),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(B): Color");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(blit_color_), "S(B): Color");
 
-  shader_create_info.codeSize = sizeof(blit_depth_frag);
-  shader_create_info.pCode = reinterpret_cast<const uint32_t*>(blit_depth_frag);
-  status = vkCreateShaderModule(*device_, &shader_create_info, nullptr,
-                                &blit_depth_);
+  shader_create_info.codeSize = sizeof(shaders::blit_depth_ps);
+  shader_create_info.pCode = shaders::blit_depth_ps;
+  status = dfn.vkCreateShaderModule(device, &shader_create_info, nullptr,
+                                    &blit_depth_);
   CheckResult(status, "vkCreateShaderModule");
   if (status != VK_SUCCESS) {
     return status;
   }
-  device_->DbgSetObjectName(uint64_t(blit_depth_),
-                            VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
-                            "S(B): Depth");
+  provider_.SetDeviceObjectName(VK_OBJECT_TYPE_SHADER_MODULE,
+                                uint64_t(blit_depth_), "S(B): Depth");
 
   // Create the descriptor set layout used for our texture sampler.
   // As it changes almost every draw we cache it per texture.
@@ -83,8 +85,8 @@ VkResult Blitter::Initialize(VulkanDevice* device) {
   texture_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
   texture_binding.pImmutableSamplers = nullptr;
   texture_set_layout_info.pBindings = &texture_binding;
-  status = vkCreateDescriptorSetLayout(*device_, &texture_set_layout_info,
-                                       nullptr, &descriptor_set_layout_);
+  status = dfn.vkCreateDescriptorSetLayout(device, &texture_set_layout_info,
+                                           nullptr, &descriptor_set_layout_);
   CheckResult(status, "vkCreateDescriptorSetLayout");
   if (status != VK_SUCCESS) {
     return status;
@@ -95,7 +97,7 @@ VkResult Blitter::Initialize(VulkanDevice* device) {
   pool_sizes[0].descriptorCount = 4096;
   pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
   descriptor_pool_ = std::make_unique<DescriptorPool>(
-      *device_, 4096,
+      provider_, 4096,
       std::vector<VkDescriptorPoolSize>(pool_sizes, std::end(pool_sizes)));
 
   // Create the pipeline layout used for our pipeline.
@@ -119,8 +121,8 @@ VkResult Blitter::Initialize(VulkanDevice* device) {
   pipeline_layout_info.pushConstantRangeCount =
       static_cast<uint32_t>(xe::countof(push_constant_ranges));
   pipeline_layout_info.pPushConstantRanges = push_constant_ranges;
-  status = vkCreatePipelineLayout(*device_, &pipeline_layout_info, nullptr,
-                                  &pipeline_layout_);
+  status = dfn.vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr,
+                                      &pipeline_layout_);
   CheckResult(status, "vkCreatePipelineLayout");
   if (status != VK_SUCCESS) {
     return status;
@@ -147,8 +149,8 @@ VkResult Blitter::Initialize(VulkanDevice* device) {
       VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,
       VK_FALSE,
   };
-  status =
-      vkCreateSampler(*device_, &sampler_create_info, nullptr, &samp_nearest_);
+  status = dfn.vkCreateSampler(device, &sampler_create_info, nullptr,
+                               &samp_nearest_);
   CheckResult(status, "vkCreateSampler");
   if (status != VK_SUCCESS) {
     return status;
@@ -158,7 +160,7 @@ VkResult Blitter::Initialize(VulkanDevice* device) {
   sampler_create_info.magFilter = VK_FILTER_LINEAR;
   sampler_create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
   status =
-      vkCreateSampler(*device_, &sampler_create_info, nullptr, &samp_linear_);
+      dfn.vkCreateSampler(device, &sampler_create_info, nullptr, &samp_linear_);
   CheckResult(status, "vkCreateSampler");
   if (status != VK_SUCCESS) {
     return status;
@@ -168,49 +170,26 @@ VkResult Blitter::Initialize(VulkanDevice* device) {
 }
 
 void Blitter::Shutdown() {
-  if (samp_nearest_) {
-    vkDestroySampler(*device_, samp_nearest_, nullptr);
-    samp_nearest_ = nullptr;
-  }
-  if (samp_linear_) {
-    vkDestroySampler(*device_, samp_linear_, nullptr);
-    samp_linear_ = nullptr;
-  }
-  if (blit_vertex_) {
-    vkDestroyShaderModule(*device_, blit_vertex_, nullptr);
-    blit_vertex_ = nullptr;
-  }
-  if (blit_color_) {
-    vkDestroyShaderModule(*device_, blit_color_, nullptr);
-    blit_color_ = nullptr;
-  }
-  if (blit_depth_) {
-    vkDestroyShaderModule(*device_, blit_depth_, nullptr);
-    blit_depth_ = nullptr;
-  }
-  if (pipeline_color_) {
-    vkDestroyPipeline(*device_, pipeline_color_, nullptr);
-    pipeline_color_ = nullptr;
-  }
-  if (pipeline_depth_) {
-    vkDestroyPipeline(*device_, pipeline_depth_, nullptr);
-    pipeline_depth_ = nullptr;
-  }
-  if (pipeline_layout_) {
-    vkDestroyPipelineLayout(*device_, pipeline_layout_, nullptr);
-    pipeline_layout_ = nullptr;
-  }
-  if (descriptor_set_layout_) {
-    vkDestroyDescriptorSetLayout(*device_, descriptor_set_layout_, nullptr);
-    descriptor_set_layout_ = nullptr;
-  }
+  const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+  util::DestroyAndNullHandle(dfn.vkDestroySampler, device, samp_nearest_);
+  util::DestroyAndNullHandle(dfn.vkDestroySampler, device, samp_linear_);
+  util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, blit_vertex_);
+  util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, blit_color_);
+  util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, blit_depth_);
+  util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, pipeline_color_);
+  util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, pipeline_depth_);
+  util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                             pipeline_layout_);
+  util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout, device,
+                             descriptor_set_layout_);
   for (auto& pipeline : pipelines_) {
-    vkDestroyPipeline(*device_, pipeline.second, nullptr);
+    dfn.vkDestroyPipeline(device, pipeline.second, nullptr);
   }
   pipelines_.clear();
 
   for (auto& pass : render_passes_) {
-    vkDestroyRenderPass(*device_, pass.second, nullptr);
+    dfn.vkDestroyRenderPass(device, pass.second, nullptr);
   }
   render_passes_.clear();
 }
@@ -230,6 +209,9 @@ void Blitter::BlitTexture2D(VkCommandBuffer command_buffer, VkFence fence,
                             VkFramebuffer dst_framebuffer, VkViewport viewport,
                             VkRect2D scissor, VkFilter filter,
                             bool color_or_depth, bool swap_channels) {
+  const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
+
   // Do we need a full draw, or can we cheap out with a blit command?
   bool full_draw = swap_channels || true;
   if (full_draw) {
@@ -249,18 +231,18 @@ void Blitter::BlitTexture2D(VkCommandBuffer command_buffer, VkFence fence,
         nullptr,
     };
 
-    vkCmdBeginRenderPass(command_buffer, &render_pass_info,
-                         VK_SUBPASS_CONTENTS_INLINE);
+    dfn.vkCmdBeginRenderPass(command_buffer, &render_pass_info,
+                             VK_SUBPASS_CONTENTS_INLINE);
 
-    vkCmdSetViewport(command_buffer, 0, 1, &viewport);
-    vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+    dfn.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+    dfn.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
     // Acquire a pipeline.
     auto pipeline =
         GetPipeline(render_pass, color_or_depth ? blit_color_ : blit_depth_,
                     color_or_depth);
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      pipeline);
+    dfn.vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pipeline);
 
     // Acquire and update a descriptor set for this image.
     auto set = descriptor_pool_->AcquireEntry(descriptor_set_layout_);
@@ -287,10 +269,10 @@ void Blitter::BlitTexture2D(VkCommandBuffer command_buffer, VkFence fence,
     write.pImageInfo = &image;
     write.pBufferInfo = nullptr;
     write.pTexelBufferView = nullptr;
-    vkUpdateDescriptorSets(*device_, 1, &write, 0, nullptr);
+    dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 
-    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipeline_layout_, 0, 1, &set, 0, nullptr);
+    dfn.vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipeline_layout_, 0, 1, &set, 0, nullptr);
 
     VtxPushConstants vtx_constants = {
         {
@@ -306,9 +288,9 @@ void Blitter::BlitTexture2D(VkCommandBuffer command_buffer, VkFence fence,
             float(dst_rect.extent.height) / dst_extents.height,
         },
     };
-    vkCmdPushConstants(command_buffer, pipeline_layout_,
-                       VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(VtxPushConstants),
-                       &vtx_constants);
+    dfn.vkCmdPushConstants(command_buffer, pipeline_layout_,
+                           VK_SHADER_STAGE_VERTEX_BIT, 0,
+                           sizeof(VtxPushConstants), &vtx_constants);
 
     PixPushConstants pix_constants = {
         0,
@@ -316,12 +298,12 @@ void Blitter::BlitTexture2D(VkCommandBuffer command_buffer, VkFence fence,
         0,
         swap_channels ? 1 : 0,
     };
-    vkCmdPushConstants(command_buffer, pipeline_layout_,
-                       VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(VtxPushConstants),
-                       sizeof(PixPushConstants), &pix_constants);
+    dfn.vkCmdPushConstants(
+        command_buffer, pipeline_layout_, VK_SHADER_STAGE_FRAGMENT_BIT,
+        sizeof(VtxPushConstants), sizeof(PixPushConstants), &pix_constants);
 
-    vkCmdDraw(command_buffer, 4, 1, 0, 0);
-    vkCmdEndRenderPass(command_buffer);
+    dfn.vkCmdDraw(command_buffer, 4, 1, 0, 0);
+    dfn.vkCmdEndRenderPass(command_buffer);
   }
 }
 
@@ -421,8 +403,10 @@ VkRenderPass Blitter::CreateRenderPass(VkFormat output_format,
       nullptr,
   };
   VkRenderPass renderpass = nullptr;
+  const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   VkResult result =
-      vkCreateRenderPass(*device_, &renderpass_info, nullptr, &renderpass);
+      dfn.vkCreateRenderPass(device, &renderpass_info, nullptr, &renderpass);
   CheckResult(result, "vkCreateRenderPass");
 
   return renderpass;
@@ -431,6 +415,8 @@ VkRenderPass Blitter::CreateRenderPass(VkFormat output_format,
 VkPipeline Blitter::CreatePipeline(VkRenderPass render_pass,
                                    VkShaderModule frag_shader,
                                    bool color_or_depth) {
+  const VulkanProvider::DeviceFunctions& dfn = provider_.dfn();
+  VkDevice device = provider_.device();
   VkResult result = VK_SUCCESS;
 
   // Pipeline
@@ -576,8 +562,8 @@ VkPipeline Blitter::CreatePipeline(VkRenderPass render_pass,
   pipeline_info.basePipelineIndex = -1;
 
   VkPipeline pipeline = nullptr;
-  result = vkCreateGraphicsPipelines(*device_, nullptr, 1, &pipeline_info,
-                                     nullptr, &pipeline);
+  result = dfn.vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_info,
+                                         nullptr, &pipeline);
   CheckResult(result, "vkCreateGraphicsPipelines");
 
   return pipeline;

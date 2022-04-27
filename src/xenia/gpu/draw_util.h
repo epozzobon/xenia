@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -25,14 +25,49 @@ namespace xe {
 namespace gpu {
 namespace draw_util {
 
-// For estimating coverage extents from vertices. This may give results that are
-// different than what the host GPU will actually draw (this is the reference
-// conversion with 1/2 ULP accuracy, but Direct3D 11 permits 0.6 ULP tolerance
-// in floating point to fixed point conversion), but is enough to tie-break
-// vertices at pixel centers (due to the half-pixel offset applied to integer
-// coordinates incorrectly, for instance) with some error tolerance near 0.5,
-// for use with the top-left rasterization rule later.
-int32_t FloatToD3D11Fixed16p8(float f32);
+// Polygonal primitive types (not including points and lines) are rasterized as
+// triangles, have front and back faces, and also support face culling and fill
+// modes (polymode_front_ptype, polymode_back_ptype). Other primitive types are
+// always "front" (but don't support front face and back face culling, according
+// to OpenGL and Vulkan specifications - even if glCullFace is
+// GL_FRONT_AND_BACK, points and lines are still drawn), and may in some cases
+// use the "para" registers instead of "front" or "back" (for "parallelogram" -
+// like poly_offset_para_enable).
+constexpr bool IsPrimitivePolygonal(bool vgt_output_path_is_tessellation_enable,
+                                    xenos::PrimitiveType type) {
+  if (vgt_output_path_is_tessellation_enable &&
+      (type == xenos::PrimitiveType::kTrianglePatch ||
+       type == xenos::PrimitiveType::kQuadPatch)) {
+    // For patch primitive types, the major mode is always explicit, so just
+    // checking if VGT_OUTPUT_PATH_CNTL::path_select is kTessellationEnable is
+    // enough.
+    return true;
+  }
+  switch (type) {
+    case xenos::PrimitiveType::kTriangleList:
+    case xenos::PrimitiveType::kTriangleFan:
+    case xenos::PrimitiveType::kTriangleStrip:
+    case xenos::PrimitiveType::kTriangleWithWFlags:
+    case xenos::PrimitiveType::kQuadList:
+    case xenos::PrimitiveType::kQuadStrip:
+    case xenos::PrimitiveType::kPolygon:
+      return true;
+    default:
+      break;
+  }
+  // TODO(Triang3l): Investigate how kRectangleList should be treated - possibly
+  // actually drawn as two polygons on the console, however, the current
+  // geometry shader doesn't care about the winding order - allowing backface
+  // culling for rectangles currently breaks 4D53082D.
+  return false;
+}
+
+inline bool IsPrimitivePolygonal(const RegisterFile& regs) {
+  return IsPrimitivePolygonal(
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable,
+      regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type);
+}
 
 // Whether with the current state, any samples to rasterize (for any reason, not
 // only to write something to a render target, but also to do sample counting or
@@ -44,18 +79,47 @@ int32_t FloatToD3D11Fixed16p8(float f32);
 bool IsRasterizationPotentiallyDone(const RegisterFile& regs,
                                     bool primitive_polygonal);
 
-inline reg::RB_DEPTHCONTROL GetDepthControlForCurrentEdramMode(
-    const RegisterFile& regs) {
-  xenos::ModeControl edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-  if (edram_mode != xenos::ModeControl::kColorDepth &&
-      edram_mode != xenos::ModeControl::kDepth) {
-    // Both depth and stencil disabled (EDRAM depth and stencil ignored).
-    reg::RB_DEPTHCONTROL disabled;
-    disabled.value = 0;
-    return disabled;
+// Direct3D 10.1+ standard sample positions, also used in Vulkan, for
+// calculations related to host MSAA, in 1/16th of a pixel.
+extern const int8_t kD3D10StandardSamplePositions2x[2][2];
+extern const int8_t kD3D10StandardSamplePositions4x[4][2];
+
+reg::RB_DEPTHCONTROL GetNormalizedDepthControl(const RegisterFile& regs);
+
+constexpr float GetD3D10PolygonOffsetFactor(
+    xenos::DepthRenderTargetFormat depth_format, bool float24_as_0_to_0_5) {
+  if (depth_format == xenos::DepthRenderTargetFormat::kD24S8) {
+    return float(1 << 24);
   }
-  return regs.Get<reg::RB_DEPTHCONTROL>();
+  // 20 explicit + 1 implicit (1.) mantissa bits.
+  // 2^20 is not enough for 415607E6 retail version's training mission shooting
+  // range floor (with the number 1) on Direct3D 12. Tested on Nvidia GeForce
+  // GTX 1070, the exact formula (taking into account the 0...1 to 0...0.5
+  // remapping described below) used for testing is
+  // `int(ceil(offset * 2^20 * 0.5)) * sign(offset)`. With 2^20 * 0.5, there
+  // are various kinds of stripes dependending on the view angle in that
+  // location. With 2^21 * 0.5, the issue is not present.
+  constexpr float kFloat24Scale = float(1 << 21);
+  // 0...0.5 range may be used on the host to represent the 0...1 guest depth
+  // range to be able to copy all possible encodings, which are [0, 2), via a
+  // [0, 1] depth output variable, during EDRAM contents reinterpretation.
+  // This is done by scaling the viewport depth bounds by 0.5. However, the
+  // depth bias is applied after the viewport. This adjustment is only needed
+  // for the constant bias - for slope-scaled, the derivatives of Z are
+  // calculated after the viewport as well, and will already include the 0.5
+  // scaling from the viewport.
+  return float24_as_0_to_0_5 ? kFloat24Scale * 0.5f : kFloat24Scale;
 }
+
+// For hosts not supporting separate front and back polygon offsets, returns the
+// polygon offset for the face which likely needs the offset the most (and that
+// will not be culled). The values returned will have the units of the original
+// registers (the scale is for 1/16 subpixels, multiply by
+// xenos::kPolygonOffsetScaleSubpixelUnit outside if the value for pixels is
+// needed).
+void GetPreferredFacePolygonOffset(const RegisterFile& regs,
+                                   bool primitive_polygonal, float& scale_out,
+                                   float& offset_out);
 
 inline bool DoesCoverageDependOnAlpha(reg::RB_COLORCONTROL rb_colorcontrol) {
   return (rb_colorcontrol.alpha_test_enable &&
@@ -67,7 +131,7 @@ inline bool DoesCoverageDependOnAlpha(reg::RB_COLORCONTROL rb_colorcontrol) {
 // pre-passes and shadowmaps. The shader must have its ucode analyzed. If
 // IsRasterizationPotentiallyDone, this shouldn't be called, and assumed false
 // instead. Helps reject the pixel shader in some cases - memexport draws in
-// Halo 3, and also most of some 1-point draws not covering anything done for
+// 4D5307E6, and also most of some 1-point draws not covering anything done for
 // some reason in different games with a leftover pixel shader from the previous
 // draw, but with SQ_PROGRAM_CNTL destroyed, reducing the number of
 // unpredictable unneeded translations of random shaders with different host
@@ -105,9 +169,10 @@ struct ViewportInfo {
 // a viewport, plus values to multiply-add the returned position by, usable on
 // host graphics APIs such as Direct3D 11+ and Vulkan, also forcing it to the
 // Direct3D clip space with 0...W Z rather than -W...W.
-void GetHostViewportInfo(const RegisterFile& regs, uint32_t resolution_scale,
-                         bool origin_bottom_left, uint32_t x_max,
-                         uint32_t y_max, bool allow_reverse_z,
+void GetHostViewportInfo(const RegisterFile& regs, uint32_t resolution_scale_x,
+                         uint32_t resolution_scale_y, bool origin_bottom_left,
+                         uint32_t x_max, uint32_t y_max, bool allow_reverse_z,
+                         reg::RB_DEPTHCONTROL normalized_depth_control,
                          bool convert_z_to_float24, bool full_float24_in_0_to_1,
                          bool pixel_shader_writes_depth,
                          ViewportInfo& viewport_info_out);
@@ -121,6 +186,17 @@ struct Scissor {
 void GetScissor(const RegisterFile& regs, Scissor& scissor_out,
                 bool clamp_to_surface_pitch = true);
 
+// Returns the color component write mask for the draw command taking into
+// account which color targets are written to by the pixel shader, as well as
+// components that don't exist in the formats of the render targets (render
+// targets with only non-existent components written are skipped, but
+// non-existent components are forced to written if some existing components of
+// the render target are actually used to make sure the host driver doesn't try
+// to take a slow path involving reading and mixing if there are any disabled
+// components even if they don't actually exist).
+uint32_t GetNormalizedColorMask(const RegisterFile& regs,
+                                uint32_t pixel_shader_writes_color_targets);
+
 // Scales, and shift amounts of the upper 32 bits of the 32x32=64-bit
 // multiplication result, for fast division and multiplication by
 // EDRAM-tile-related amounts.
@@ -130,6 +206,46 @@ constexpr uint32_t kDivideScale5 = 0xCCCCCCCDu;
 constexpr uint32_t kDivideUpperShift5 = 2;
 constexpr uint32_t kDivideScale15 = 0x88888889u;
 constexpr uint32_t kDivideUpperShift15 = 3;
+
+inline void GetEdramTileWidthDivideScaleAndUpperShift(
+    uint32_t resolution_scale_x, uint32_t& divide_scale,
+    uint32_t& divide_upper_shift) {
+  switch (resolution_scale_x) {
+    case 1:
+      divide_scale = kDivideScale5;
+      divide_upper_shift = kDivideUpperShift5 + 4;
+      break;
+    case 2:
+      divide_scale = kDivideScale5;
+      divide_upper_shift = kDivideUpperShift5 + 5;
+      break;
+    case 3:
+      divide_scale = kDivideScale15;
+      divide_upper_shift = kDivideUpperShift15 + 4;
+      break;
+    default:
+      assert_unhandled_case(resolution_scale_x);
+  }
+}
+
+// Never an identity conversion - can always write conditional move instructions
+// to shaders that will be no-ops for conversion from guest to host samples.
+// While we don't know the exact guest sample pattern, due to the way
+// multisampled render targets are stored in the memory (like 1x2 single-sampled
+// pixels with 2x MSAA, or like 2x2 single-sampled pixels with 4x), assuming
+// that the sample 0 is the top sample, and the sample 1 is the bottom one.
+inline uint32_t GetD3D10SampleIndexForGuest2xMSAA(
+    uint32_t guest_sample_index, bool native_2x_msaa_supported) {
+  assert(guest_sample_index <= 1);
+  if (native_2x_msaa_supported) {
+    // On Direct3D 10.1 with native 2x MSAA, the top-left sample is 1, and the
+    // bottom-right sample is 0.
+    return guest_sample_index ? 0 : 1;
+  }
+  // When native 2x MSAA is not supported, using the top-left (0) and the
+  // bottom-right (3) samples of the guaranteed 4x MSAA.
+  return guest_sample_index ? 3 : 0;
+}
 
 // To avoid passing values that the shader won't understand (even though
 // Direct3D 9 shouldn't pass them anyway).
@@ -141,6 +257,7 @@ xenos::CopySampleSelect SanitizeCopySampleSelect(
 // constants.
 
 union ResolveEdramPackedInfo {
+  uint32_t packed;
   struct {
     // With 32bpp/64bpp taken into account.
     uint32_t pitch_tiles : xenos::kEdramPitchTilesBits;
@@ -154,12 +271,15 @@ union ResolveEdramPackedInfo {
     // the impact of the half-pixel offset with resolution scaling.
     uint32_t duplicate_second_pixel : 1;
   };
-  uint32_t packed;
+  ResolveEdramPackedInfo() : packed(0) {
+    static_assert_size(*this, sizeof(packed));
+  }
 };
 static_assert(sizeof(ResolveEdramPackedInfo) <= sizeof(uint32_t),
               "ResolveEdramPackedInfo must be packable in uint32_t");
 
 union ResolveAddressPackedInfo {
+  uint32_t packed;
   struct {
     // 160x32 is divisible by both the EDRAM tile size (80x16 samples, but for
     // simplicity, this is in pixels) and the texture tile size (32x32), so
@@ -184,7 +304,9 @@ union ResolveAddressPackedInfo {
 
     xenos::CopySampleSelect copy_sample_select : 3;
   };
-  uint32_t packed;
+  ResolveAddressPackedInfo() : packed(0) {
+    static_assert_size(*this, sizeof(packed));
+  }
 };
 static_assert(sizeof(ResolveAddressPackedInfo) <= sizeof(uint32_t),
               "ResolveAddressPackedInfo must be packable in uint32_t");
@@ -196,38 +318,33 @@ void GetResolveEdramTileSpan(ResolveEdramPackedInfo edram_info,
                              uint32_t& base_out, uint32_t& row_length_used_out,
                              uint32_t& rows_out);
 
+union ResolveCopyDestPitchPackedInfo {
+  uint32_t packed;
+  struct {
+    // 0...16384/32.
+    uint32_t pitch_aligned_div_32 : xenos::kTexture2DCubeMaxWidthHeightLog2 +
+                                    2 - xenos::kTextureTileWidthHeightLog2;
+    uint32_t height_aligned_div_32 : xenos::kTexture2DCubeMaxWidthHeightLog2 +
+                                     2 - xenos::kTextureTileWidthHeightLog2;
+  };
+  ResolveCopyDestPitchPackedInfo() : packed(0) {
+    static_assert_size(*this, sizeof(packed));
+  }
+};
+
 // For backends with Shader Model 5-like compute, host shaders to use to perform
 // copying in resolve operations.
 enum class ResolveCopyShaderIndex {
   kFast32bpp1x2xMSAA,
   kFast32bpp4xMSAA,
-  kFast32bpp2xRes,
-  kFast32bpp3xRes1x2xMSAA,
-  kFast32bpp3xRes4xMSAA,
   kFast64bpp1x2xMSAA,
   kFast64bpp4xMSAA,
-  kFast64bpp2xRes,
-  kFast64bpp3xRes,
 
   kFull8bpp,
-  kFull8bpp2xRes,
-  kFull8bpp3xRes,
   kFull16bpp,
-  kFull16bpp2xRes,
-  kFull16bppFrom32bpp3xRes,
-  kFull16bppFrom64bpp3xRes,
   kFull32bpp,
-  kFull32bpp2xRes,
-  kFull32bppFrom32bpp3xRes,
-  kFull32bppFrom64bpp3xRes,
   kFull64bpp,
-  kFull64bpp2xRes,
-  kFull64bppFrom32bpp3xRes,
-  kFull64bppFrom64bpp3xRes,
   kFull128bpp,
-  kFull128bpp2xRes,
-  kFull128bppFrom32bpp3xRes,
-  kFull128bppFrom64bpp3xRes,
 
   kCount,
   kUnknown = kCount,
@@ -236,9 +353,6 @@ enum class ResolveCopyShaderIndex {
 struct ResolveCopyShaderInfo {
   // Debug name of the pipeline state object with this shader.
   const char* debug_name;
-  // Only need to load this shader if the emulator resolution scale == this
-  // value.
-  uint32_t resolution_scale;
   // Whether the EDRAM source needs be bound as a raw buffer (ByteAddressBuffer
   // in Direct3D) since it can load different numbers of 32-bit values at once
   // on some hardware. If the host API doesn't support raw buffers, a typed
@@ -268,7 +382,7 @@ struct ResolveCopyShaderConstants {
     ResolveEdramPackedInfo edram_info;
     ResolveAddressPackedInfo address_info;
     reg::RB_COPY_DEST_INFO dest_info;
-    reg::RB_COPY_DEST_PITCH dest_pitch;
+    ResolveCopyDestPitchPackedInfo dest_pitch_aligned;
   };
   DestRelative dest_relative;
   uint32_t dest_base;
@@ -303,8 +417,8 @@ struct ResolveInfo {
 
   ResolveAddressPackedInfo address;
 
-  reg::RB_COPY_DEST_INFO rb_copy_dest_info;
-  reg::RB_COPY_DEST_PITCH rb_copy_dest_pitch;
+  reg::RB_COPY_DEST_INFO copy_dest_info;
+  ResolveCopyDestPitchPackedInfo copy_dest_pitch_aligned;
 
   // Memory range that will potentially be modified by copying, with
   // address.local_x/y_div_8 & 31 being the origin relative to it.
@@ -333,8 +447,9 @@ struct ResolveInfo {
   }
 
   ResolveCopyShaderIndex GetCopyShader(
-      uint32_t resolution_scale, ResolveCopyShaderConstants& constants_out,
-      uint32_t& group_count_x_out, uint32_t& group_count_y_out) const;
+      uint32_t resolution_scale_x, uint32_t resolution_scale_y,
+      ResolveCopyShaderConstants& constants_out, uint32_t& group_count_x_out,
+      uint32_t& group_count_y_out) const;
 
   bool IsClearingDepth() const {
     return rb_copy_control.depth_clear_enable != 0;
@@ -366,7 +481,8 @@ struct ResolveInfo {
     constants_out.address_info = address;
   }
 
-  std::pair<uint32_t, uint32_t> GetClearShaderGroupCount() const {
+  std::pair<uint32_t, uint32_t> GetClearShaderGroupCount(
+      uint32_t resolution_scale_x, uint32_t resolution_scale_y) const {
     // 8 guest MSAA samples per invocation.
     uint32_t width_samples_div_8 = address.width_div_8;
     uint32_t height_samples_div_8 = address.height_div_8;
@@ -379,6 +495,8 @@ struct ResolveInfo {
         width_samples_div_8 <<= 1;
       }
     }
+    width_samples_div_8 *= resolution_scale_x;
+    height_samples_div_8 *= resolution_scale_y;
     return std::make_pair((width_samples_div_8 + uint32_t(7)) >> 3,
                           height_samples_div_8);
   }
@@ -390,9 +508,21 @@ struct ResolveInfo {
 // emulated as snorm, with range limited to -1...1, but with correct blending
 // within that range.
 bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
-                    TraceWriter& trace_writer, uint32_t resolution_scale,
+                    TraceWriter& trace_writer, bool is_resolution_scaled,
                     bool fixed_16_truncated_to_minus_1_to_1,
                     ResolveInfo& info_out);
+
+union ResolveResolutionScaleConstant {
+  uint32_t packed;
+  struct {
+    // 1 to 3.
+    uint32_t resolution_scale_x : 2;
+    uint32_t resolution_scale_y : 2;
+  };
+  ResolveResolutionScaleConstant() : packed(0) {
+    static_assert_size(*this, sizeof(packed));
+  }
+};
 
 // Taking user configuration - stretching or letterboxing, overscan region to
 // crop to fill while maintaining the aspect ratio - into account, returns the

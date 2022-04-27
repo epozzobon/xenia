@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Xenia Developers. All rights reserved.                      *
+ * Copyright 2022 Xenia Developers. All rights reserved.                      *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -731,6 +731,25 @@ struct VECTOR_SHL_V128
   static void EmitInt8(X64Emitter& e, const EmitArgType& i) {
     // TODO(benvanik): native version (with shift magic).
     if (i.src2.is_constant) {
+      if (e.IsFeatureEnabled(kX64EmitGFNI)) {
+        const auto& shamt = i.src2.constant();
+        bool all_same = true;
+        for (size_t n = 0; n < 16 - n; ++n) {
+          if (shamt.u8[n] != shamt.u8[n + 1]) {
+            all_same = false;
+            break;
+          }
+        }
+        if (all_same) {
+          // Every count is the same, so we can use gf2p8affineqb.
+          const uint8_t shift_amount = shamt.u8[0] & 0b111;
+          const uint64_t shift_matrix =
+              UINT64_C(0x0102040810204080) >> (shift_amount * 8);
+          e.vgf2p8affineqb(i.dest, i.src1,
+                           e.StashConstantXmm(0, vec128q(shift_matrix)), 0);
+          return;
+        }
+      }
       e.lea(e.GetNativeParam(1), e.StashConstantXmm(1, i.src2.constant()));
     } else {
       e.lea(e.GetNativeParam(1), e.StashXmm(1, i.src2));
@@ -920,6 +939,25 @@ struct VECTOR_SHR_V128
   static void EmitInt8(X64Emitter& e, const EmitArgType& i) {
     // TODO(benvanik): native version (with shift magic).
     if (i.src2.is_constant) {
+      if (e.IsFeatureEnabled(kX64EmitGFNI)) {
+        const auto& shamt = i.src2.constant();
+        bool all_same = true;
+        for (size_t n = 0; n < 16 - n; ++n) {
+          if (shamt.u8[n] != shamt.u8[n + 1]) {
+            all_same = false;
+            break;
+          }
+        }
+        if (all_same) {
+          // Every count is the same, so we can use gf2p8affineqb.
+          const uint8_t shift_amount = shamt.u8[0] & 0b111;
+          const uint64_t shift_matrix = UINT64_C(0x0102040810204080)
+                                        << (shift_amount * 8);
+          e.vgf2p8affineqb(i.dest, i.src1,
+                           e.StashConstantXmm(0, vec128q(shift_matrix)), 0);
+          return;
+        }
+      }
       e.lea(e.GetNativeParam(1), e.StashConstantXmm(1, i.src2.constant()));
     } else {
       e.lea(e.GetNativeParam(1), e.StashXmm(1, i.src2));
@@ -1084,6 +1122,27 @@ struct VECTOR_SHA_V128
   static void EmitInt8(X64Emitter& e, const EmitArgType& i) {
     // TODO(benvanik): native version (with shift magic).
     if (i.src2.is_constant) {
+      if (e.IsFeatureEnabled(kX64EmitGFNI)) {
+        const auto& shamt = i.src2.constant();
+        bool all_same = true;
+        for (size_t n = 0; n < 16 - n; ++n) {
+          if (shamt.u8[n] != shamt.u8[n + 1]) {
+            all_same = false;
+            break;
+          }
+        }
+        if (all_same) {
+          // Every count is the same, so we can use gf2p8affineqb.
+          const uint8_t shift_amount = shamt.u8[0] & 0b111;
+          const uint64_t shift_matrix =
+              (UINT64_C(0x0102040810204080) << (shift_amount * 8)) |
+              (UINT64_C(0x8080808080808080) >> (64 - shift_amount * 8));
+          ;
+          e.vgf2p8affineqb(i.dest, i.src1,
+                           e.StashConstantXmm(0, vec128q(shift_matrix)), 0);
+          return;
+        }
+      }
       e.lea(e.GetNativeParam(1), e.StashConstantXmm(1, i.src2.constant()));
     } else {
       e.lea(e.GetNativeParam(1), e.StashXmm(1, i.src2));
@@ -1228,7 +1287,6 @@ static __m128i EmulateVectorRotateLeft(void*, __m128i src1, __m128i src2) {
   return _mm_load_si128(reinterpret_cast<__m128i*>(value));
 }
 
-// TODO(benvanik): AVX512 has a native variable rotate (rolv).
 struct VECTOR_ROTATE_LEFT_V128
     : Sequence<VECTOR_ROTATE_LEFT_V128,
                I<OPCODE_VECTOR_ROTATE_LEFT, V128Op, V128Op, V128Op>> {
@@ -1259,7 +1317,9 @@ struct VECTOR_ROTATE_LEFT_V128
         e.vmovaps(i.dest, e.xmm0);
         break;
       case INT32_TYPE: {
-        if (e.IsFeatureEnabled(kX64EmitAVX2)) {
+        if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
+          e.vprolvd(i.dest, i.src1, i.src2);
+        } else if (e.IsFeatureEnabled(kX64EmitAVX2)) {
           Xmm temp = i.dest;
           if (i.dest == i.src1 || i.dest == i.src2) {
             temp = e.xmm2;
@@ -1514,7 +1574,11 @@ EMITTER_OPCODE_TABLE(OPCODE_EXTRACT, EXTRACT_I8, EXTRACT_I16, EXTRACT_I32);
 struct SPLAT_I8 : Sequence<SPLAT_I8, I<OPCODE_SPLAT, V128Op, I8Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
-      // TODO(benvanik): faster constant splats.
+      if (e.IsFeatureEnabled(kX64EmitGFNI)) {
+        e.pxor(e.xmm0, e.xmm0);
+        e.gf2p8affineqb(i.dest, e.xmm0, i.src1.constant());
+        return;
+      }
       e.mov(e.eax, i.src1.constant());
       e.vmovd(e.xmm0, e.eax);
     } else {
@@ -1862,8 +1926,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       src = i.src1;
     }
     // Saturate to [3,3....] so that only values between 3...[00] and 3...[FF]
-    // are valid - max before min to pack NaN as zero (Red Dead Redemption is
-    // heavily affected by the order - packs 0xFFFFFFFF in matrix code to get 0
+    // are valid - max before min to pack NaN as zero (5454082B is heavily
+    // affected by the order - packs 0xFFFFFFFF in matrix code to get a 0
     // constant).
     e.vmaxps(i.dest, src, e.GetXmmConstPtr(XMM3333));
     e.vminps(i.dest, i.dest, e.GetXmmConstPtr(XMMPackD3DCOLORSat));

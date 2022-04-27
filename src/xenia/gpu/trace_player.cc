@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -17,9 +17,8 @@
 namespace xe {
 namespace gpu {
 
-TracePlayer::TracePlayer(xe::ui::Loop* loop, GraphicsSystem* graphics_system)
-    : loop_(loop),
-      graphics_system_(graphics_system),
+TracePlayer::TracePlayer(GraphicsSystem* graphics_system)
+    : graphics_system_(graphics_system),
       current_frame_index_(0),
       current_command_index_(-1) {
   // Need to allocate all of physical memory so that we can write to it during
@@ -31,6 +30,7 @@ TracePlayer::TracePlayer(xe::ui::Loop* loop, GraphicsSystem* graphics_system)
                    kMemoryProtectRead | kMemoryProtectWrite);
 
   playback_event_ = xe::threading::Event::CreateAutoResetEvent(false);
+  assert_not_null(playback_event_);
 }
 
 TracePlayer::~TracePlayer() { delete[] edram_snapshot_; }
@@ -88,15 +88,19 @@ void TracePlayer::PlayTrace(const uint8_t* trace_data, size_t trace_size,
                             TracePlaybackMode playback_mode,
                             bool clear_caches) {
   playing_trace_ = true;
+  // Pass a copy of present_last_copy_ to the thread so it's not accessible by
+  // multiple threads at once.
+  bool present_last_copy = present_last_copy_;
   graphics_system_->command_processor()->CallInThread([=]() {
-    PlayTraceOnThread(trace_data, trace_size, playback_mode, clear_caches);
+    PlayTraceOnThread(trace_data, trace_size, playback_mode, clear_caches,
+                      present_last_copy);
   });
 }
 
 void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
                                     size_t trace_size,
                                     TracePlaybackMode playback_mode,
-                                    bool clear_caches) {
+                                    bool clear_caches, bool present_last_copy) {
   auto memory = graphics_system_->memory();
   auto command_processor = graphics_system_->command_processor();
 
@@ -104,7 +108,10 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
     command_processor->ClearCaches();
   }
 
-  command_processor->set_swap_mode(SwapMode::kIgnored);
+  if (present_last_copy) {
+    command_processor->SetIgnoreSwap(true);
+  }
+
   playback_percent_ = 0;
   auto trace_end = trace_data + trace_size;
 
@@ -216,8 +223,11 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
   }
 
   playing_trace_ = false;
-  command_processor->set_swap_mode(SwapMode::kNormal);
-  command_processor->IssueSwap(0, 1280, 720);
+
+  if (present_last_copy) {
+    command_processor->SetIgnoreSwap(false);
+    command_processor->IssueSwap(0, 1280, 720);
+  }
 
   playback_event_->Set();
 }
