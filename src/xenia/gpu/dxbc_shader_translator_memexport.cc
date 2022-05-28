@@ -11,6 +11,7 @@
 #include "xenia/base/math.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
+#include "xenia/gpu/texture_cache.h"
 
 namespace xe {
 namespace gpu {
@@ -139,7 +140,7 @@ void DxbcShaderTranslator::ExportToMemory() {
       in_position_used_ |= resolution_scaled_axes;
       a_.OpFToU(
           dxbc::Dest::R(control_temp, resolution_scaled_axes << 1),
-          dxbc::Src::V(uint32_t(InOutRegister::kPSInPosition), 0b0100 << 2));
+          dxbc::Src::V1D(uint32_t(InOutRegister::kPSInPosition), 0b0100 << 2));
       dxbc::Dest resolution_scaling_temp_dest(
           dxbc::Dest::R(control_temp, 0b1000));
       dxbc::Src resolution_scaling_temp_src(
@@ -159,6 +160,11 @@ void DxbcShaderTranslator::ExportToMemory() {
             dxbc::Src::R(control_temp).Select(1 + i));
         uint32_t axis_resolution_scale =
             i ? draw_resolution_scale_y_ : draw_resolution_scale_x_;
+        static_assert(
+            TextureCache::kMaxDrawResolutionScaleAlongAxis <= 3,
+            "DxbcShaderTranslator memexport draw resolution scaling "
+            "conditional generation supports draw resolution scaling factors "
+            "of only up to 3");
         switch (axis_resolution_scale) {
           case 2:
             // xy & 1 == 1.
@@ -201,8 +207,8 @@ void DxbcShaderTranslator::ExportToMemory() {
       a_.OpIEq(
           dxbc::Dest::R(control_temp,
                         inner_condition_provided ? 0b0010 : 0b0001),
-          dxbc::Src::V(uint32_t(InOutRegister::kPSInFrontFaceAndSampleIndex),
-                       dxbc::Src::kYYYY),
+          dxbc::Src::V1D(uint32_t(InOutRegister::kPSInFrontFaceAndSampleIndex),
+                         dxbc::Src::kYYYY),
           dxbc::Src::R(control_temp, dxbc::Src::kYYYY));
       if (inner_condition_provided) {
         // Merge with the previous condition in control_temp.x.

@@ -22,7 +22,6 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/draw_util.h"
-#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
@@ -77,25 +76,6 @@ DEFINE_string(
     " Any other value:\n"
     "  Choose what is considered the most optimal (currently \"on_copy\").",
     "GPU");
-DEFINE_int32(
-    draw_resolution_scale_x, 1,
-    "Integer pixel width scale used for scaling the rendering resolution "
-    "opaquely to the game.\n"
-    "1, 2 and 3 may be supported, but support of anything above 1 depends on "
-    "the device properties, such as whether it supports sparse binding / tiled "
-    "resources, the number of virtual address bits per resource, and other "
-    "factors.\n"
-    "Various effects and parts of game rendering pipelines may work "
-    "incorrectly as pixels become ambiguous from the game's perspective and "
-    "because half-pixel offset (which normally doesn't affect coverage when "
-    "MSAA isn't used) becomes full-pixel.",
-    "GPU");
-DEFINE_int32(
-    draw_resolution_scale_y, 1,
-    "Integer pixel width scale used for scaling the rendering resolution "
-    "opaquely to the game.\n"
-    "See draw_resolution_scale_x for more information.",
-    "GPU");
 DEFINE_bool(
     draw_resolution_scaled_texture_offsets, true,
     "Apply offsets from texture fetch instructions taking resolution scale "
@@ -142,6 +122,19 @@ DEFINE_bool(
     "When the host can only support 16_16 and 16_16_16_16 render targets as "
     "-1...1, remap -32...32 to -1...1 to use the full possible range of "
     "values, at the expense of multiplicative blending correctness.",
+    "GPU");
+// Enabled by default as the GPU is overall usually the bottleneck when the
+// pixel shader interlock render backend implementation is used, anything that
+// may improve GPU performance is favorable.
+DEFINE_bool(
+    execute_unclipped_draw_vs_on_cpu_for_psi_render_backend, true,
+    "If execute_unclipped_draw_vs_on_cpu is enabled, execute the vertex shader "
+    "for unclipped draws on the CPU even when using the pixel shader interlock "
+    "(rasterizer-ordered view) implementation of the render backend on the "
+    "host, for which no expensive copying between host render targets is "
+    "needed when the ownership of a EDRAM range is changed.\n"
+    "If this is enabled, excessive barriers may be eliminated when switching "
+    "between different render targets in separate EDRAM locations.",
     "GPU");
 
 namespace xe {
@@ -367,7 +360,8 @@ void RenderTargetCache::BeginFrame() { ResetAccumulatedRenderTargets(); }
 
 bool RenderTargetCache::Update(bool is_rasterization_done,
                                reg::RB_DEPTHCONTROL normalized_depth_control,
-                               uint32_t normalized_color_mask) {
+                               uint32_t normalized_color_mask,
+                               const Shader& vertex_shader) {
   const RegisterFile& regs = register_file();
   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
 
@@ -403,7 +397,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     uint32_t pitch_pixels_tile_aligned_scaled =
         pitch_tiles_at_32bpp *
         (xenos::kEdramTileWidthSamples >> msaa_samples_x_log2) *
-        GetResolutionScaleX();
+        draw_resolution_scale_x();
     uint32_t max_render_target_width = GetMaxRenderTargetWidth();
     if (pitch_pixels_tile_aligned_scaled > max_render_target_width) {
       // TODO(Triang3l): If really needed for some game on some device, clamp
@@ -556,47 +550,13 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
 
   // Estimate height used by render targets (for color for writes, for depth /
   // stencil for both reads and writes) from various sources.
-  uint32_t height_used =
-      GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples);
-  int32_t window_y_offset =
-      regs.Get<reg::PA_SC_WINDOW_OFFSET>().window_y_offset;
-  if (!regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable) {
-    auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
-    float viewport_bottom = 0.0f;
-    // First calculate all the integer.0 or integer.5 offsetting exactly at full
-    // precision.
-    if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
-      viewport_bottom += float(window_y_offset);
-    }
-    if (cvars::half_pixel_offset &&
-        !regs.Get<reg::PA_SU_VTX_CNTL>().pix_center) {
-      viewport_bottom += 0.5f;
-    }
-    // Then apply the floating-point viewport offset.
-    if (pa_cl_vte_cntl.vport_y_offset_ena) {
-      viewport_bottom += regs[XE_GPU_REG_PA_CL_VPORT_YOFFSET].f32;
-    }
-    viewport_bottom += pa_cl_vte_cntl.vport_y_scale_ena
-                           ? std::abs(regs[XE_GPU_REG_PA_CL_VPORT_YSCALE].f32)
-                           : 1.0f;
-    // Using floor, or, rather, truncation (because maxing with zero anyway)
-    // similar to how viewport scissoring behaves on real AMD, Intel and Nvidia
-    // GPUs on Direct3D 12, also like in draw_util::GetHostViewportInfo.
-    // max(0.0f, viewport_bottom) to drop NaN and < 0 - max picks the first
-    // argument in the !(a < b) case (always for NaN), min as float (height_used
-    // is well below 2^24) to safely drop very large values.
-    height_used =
-        uint32_t(std::min(float(height_used), std::max(0.0f, viewport_bottom)));
-  }
-  int32_t scissor_bottom =
-      int32_t(regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>().br_y);
-  if (!regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>().window_offset_disable) {
-    scissor_bottom += window_y_offset;
-  }
-  scissor_bottom =
-      std::min(scissor_bottom, regs.Get<reg::PA_SC_SCREEN_SCISSOR_BR>().br_y);
-  height_used =
-      std::min(height_used, uint32_t(std::max(scissor_bottom, int32_t(0))));
+  uint32_t height_used = std::min(
+      GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples),
+      draw_extent_estimator_.EstimateMaxY(
+          interlock_barrier_only
+              ? cvars::execute_unclipped_draw_vs_on_cpu_for_psi_render_backend
+              : true,
+          vertex_shader));
 
   // Sorted by EDRAM base and then by index in the pipeline - for simplicity,
   // treat render targets placed closer to the end of the EDRAM as truncating
@@ -855,14 +815,13 @@ uint32_t RenderTargetCache::GetRenderTargetHeight(
       !(xenos::kTexture2DCubeMaxWidthHeight % xenos::kEdramTileHeightSamples),
       "Maximum guest render target height is assumed to always be a multiple "
       "of an EDRAM tile height");
-  uint32_t resolution_scale_y = GetResolutionScaleY();
   uint32_t max_height_scaled =
-      std::min(xenos::kTexture2DCubeMaxWidthHeight * resolution_scale_y,
+      std::min(xenos::kTexture2DCubeMaxWidthHeight * draw_resolution_scale_y(),
                GetMaxRenderTargetHeight());
   uint32_t msaa_samples_y_log2 =
       uint32_t(msaa_samples >= xenos::MsaaSamples::k2X);
   uint32_t tile_height_samples_scaled =
-      xenos::kEdramTileHeightSamples * resolution_scale_y;
+      xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
   tile_rows = std::min(tile_rows, (max_height_scaled << msaa_samples_y_log2) /
                                       tile_height_samples_scaled);
   assert_not_zero(tile_rows);
@@ -889,9 +848,9 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
       (transfer_rectangle.width_pixels >> 3) - 1;
   rectangle_constant_out = rectangle_constant;
   // 1 thread group = 64x8 host samples.
-  uint32_t pixel_size_x = GetResolutionScaleX()
+  uint32_t pixel_size_x = draw_resolution_scale_x()
                           << uint32_t(msaa_samples >= xenos::MsaaSamples::k4X);
-  uint32_t pixel_size_y = GetResolutionScaleY()
+  uint32_t pixel_size_y = draw_resolution_scale_y()
                           << uint32_t(msaa_samples >= xenos::MsaaSamples::k2X);
   group_count_x_out =
       (transfer_rectangle.width_pixels * pixel_size_x + 63) >> 6;
@@ -1022,7 +981,7 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
   uint32_t pitch_pixels =
       pitch_tiles_at_32bpp *
       (xenos::kEdramTileWidthSamples >> msaa_samples_x_log2);
-  uint32_t pitch_pixels_scaled = pitch_pixels * GetResolutionScaleX();
+  uint32_t pitch_pixels_scaled = pitch_pixels * draw_resolution_scale_x();
   uint32_t max_render_target_width = GetMaxRenderTargetWidth();
   if (pitch_pixels_scaled > max_render_target_width) {
     // TODO(Triang3l): If really needed for some game on some device, clamp the
@@ -1168,12 +1127,10 @@ RenderTargetCache::RenderTarget*
 RenderTargetCache::PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
     xenos::ColorRenderTargetFormat color_format) {
   assert_true(GetPath() == Path::kHostRenderTargets);
-  uint32_t resolution_scale_x = GetResolutionScaleX();
-  uint32_t resolution_scale_y = GetResolutionScaleY();
   constexpr uint32_t kPitchTilesAt32bpp = 16;
   constexpr uint32_t kWidth =
       kPitchTilesAt32bpp * xenos::kEdramTileWidthSamples;
-  if (kWidth * resolution_scale_x > GetMaxRenderTargetWidth()) {
+  if (kWidth * draw_resolution_scale_x() > GetMaxRenderTargetWidth()) {
     return nullptr;
   }
   // Same render target height is used for 32bpp and 64bpp to allow mixing them.
@@ -1189,7 +1146,7 @@ RenderTargetCache::PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
       "Using width of the render target for EDRAM snapshot restoration that is "
       "expect to fully cover the EDRAM without exceeding the maximum guest "
       "render target height.");
-  if (kHeight * resolution_scale_y > GetMaxRenderTargetHeight()) {
+  if (kHeight * draw_resolution_scale_y() > GetMaxRenderTargetHeight()) {
     return nullptr;
   }
   RenderTargetKey render_target_key;
