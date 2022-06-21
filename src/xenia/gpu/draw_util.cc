@@ -649,31 +649,6 @@ uint32_t GetNormalizedColorMask(const RegisterFile& regs,
   return normalized_color_mask;
 }
 
-void GetEdramTileWidthDivideScaleAndUpperShift(
-    uint32_t draw_resolution_scale_x, uint32_t& divide_scale_out,
-    uint32_t& divide_upper_shift_out) {
-  static_assert(
-      TextureCache::kMaxDrawResolutionScaleAlongAxis <= 3,
-      "GetEdramTileWidthDivideScaleAndUpperShift provides values only for draw "
-      "resolution scaling factors of up to 3");
-  switch (draw_resolution_scale_x) {
-    case 1:
-      divide_scale_out = kDivideScale5;
-      divide_upper_shift_out = kDivideUpperShift5 + 4;
-      break;
-    case 2:
-      divide_scale_out = kDivideScale5;
-      divide_upper_shift_out = kDivideUpperShift5 + 5;
-      break;
-    case 3:
-      divide_scale_out = kDivideScale15;
-      divide_upper_shift_out = kDivideUpperShift15 + 4;
-      break;
-    default:
-      assert_unhandled_case(draw_resolution_scale_x);
-  }
-}
-
 xenos::CopySampleSelect SanitizeCopySampleSelect(
     xenos::CopySampleSelect copy_sample_select, xenos::MsaaSamples msaa_samples,
     bool is_depth) {
@@ -764,7 +739,8 @@ const ResolveCopyShaderInfo
 bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
                     TraceWriter& trace_writer, uint32_t draw_resolution_scale_x,
                     uint32_t draw_resolution_scale_y,
-                    bool fixed_16_truncated_to_minus_1_to_1,
+                    bool fixed_rg16_truncated_to_minus_1_to_1,
+                    bool fixed_rgba16_truncated_to_minus_1_to_1,
                     ResolveInfo& info_out) {
   auto rb_copy_control = regs.Get<reg::RB_COPY_CONTROL>();
   info_out.rb_copy_control = rb_copy_control;
@@ -1093,8 +1069,9 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     color_edram_info.format = uint32_t(color_info.color_format);
     color_edram_info.format_is_64bpp = is_64bpp;
     color_edram_info.duplicate_second_pixel = uint32_t(duplicate_second_pixel);
-    if (fixed_16_truncated_to_minus_1_to_1 &&
-        (color_info.color_format == xenos::ColorRenderTargetFormat::k_16_16 ||
+    if ((fixed_rg16_truncated_to_minus_1_to_1 &&
+         color_info.color_format == xenos::ColorRenderTargetFormat::k_16_16) ||
+        (fixed_rgba16_truncated_to_minus_1_to_1 &&
          color_info.color_format ==
              xenos::ColorRenderTargetFormat::k_16_16_16_16)) {
       // The texture expects 0x8001 = -32, 0x7FFF = 32, but the hack making
