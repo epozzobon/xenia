@@ -30,9 +30,7 @@ void GetSubresourcesFromFetchConstant(
     const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t* width_minus_1_out,
     uint32_t* height_minus_1_out, uint32_t* depth_or_array_size_minus_1_out,
     uint32_t* base_page_out, uint32_t* mip_page_out,
-    uint32_t* mip_min_level_out, uint32_t* mip_max_level_out,
-    xenos::TextureFilter sampler_mip_filter =
-        xenos::TextureFilter::kUseFetchConst);
+    uint32_t* mip_min_level_out, uint32_t* mip_max_level_out);
 
 // Gets the number of the mipmap level where the packed mips are stored.
 inline uint32_t GetPackedMipLevel(uint32_t width, uint32_t height) {
@@ -335,6 +333,13 @@ constexpr bool IsAnySignSigned(uint8_t packed_signs) {
       packed_signs ^ (uint32_t(xenos::TextureSign::kSigned) * 0b01010101);
   return ((xor_signed | (xor_signed >> 1)) & 0b01010101) != 0b01010101;
 }
+
+// Returns normalized clamp modes specified in the fetch constant based on the
+// texture data dimension in it.
+void GetClampModesForDimension(const xenos::xe_gpu_texture_fetch_t& fetch,
+                               xenos::ClampMode& clamp_x_out,
+                               xenos::ClampMode& clamp_y_out,
+                               xenos::ClampMode& clamp_z_out);
 
 }  // namespace texture_util
 }  // namespace gpu

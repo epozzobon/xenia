@@ -965,23 +965,37 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
 
   SamplerParameters parameters;
 
-  parameters.clamp_x = fetch.clamp_x;
-  parameters.clamp_y = fetch.clamp_y;
-  parameters.clamp_z = fetch.clamp_z;
-  parameters.border_color = fetch.border_color;
+  xenos::ClampMode fetch_clamp_x, fetch_clamp_y, fetch_clamp_z;
+  texture_util::GetClampModesForDimension(fetch, fetch_clamp_x, fetch_clamp_y,
+                                          fetch_clamp_z);
+  parameters.clamp_x = NormalizeClampMode(fetch_clamp_x);
+  parameters.clamp_y = NormalizeClampMode(fetch_clamp_y);
+  parameters.clamp_z = NormalizeClampMode(fetch_clamp_z);
+  if (xenos::ClampModeUsesBorder(parameters.clamp_x) ||
+      xenos::ClampModeUsesBorder(parameters.clamp_y) ||
+      xenos::ClampModeUsesBorder(parameters.clamp_z)) {
+    parameters.border_color = fetch.border_color;
+  } else {
+    parameters.border_color = xenos::BorderColor::k_ABGR_Black;
+  }
 
   uint32_t mip_min_level;
-  texture_util::GetSubresourcesFromFetchConstant(
-      fetch, nullptr, nullptr, nullptr, nullptr, nullptr, &mip_min_level,
-      nullptr, binding.mip_filter);
+  texture_util::GetSubresourcesFromFetchConstant(fetch, nullptr, nullptr,
+                                                 nullptr, nullptr, nullptr,
+                                                 &mip_min_level, nullptr);
   parameters.mip_min_level = mip_min_level;
 
+  // TODO(Triang3l): Disable filtering for texture formats not supporting it.
   xenos::AnisoFilter aniso_filter =
       binding.aniso_filter == xenos::AnisoFilter::kUseFetchConst
           ? fetch.aniso_filter
           : binding.aniso_filter;
   aniso_filter = std::min(aniso_filter, xenos::AnisoFilter::kMax_16_1);
   parameters.aniso_filter = aniso_filter;
+  xenos::TextureFilter mip_filter =
+      binding.mip_filter == xenos::TextureFilter::kUseFetchConst
+          ? fetch.mip_filter
+          : binding.mip_filter;
   if (aniso_filter != xenos::AnisoFilter::kDisabled) {
     parameters.mag_linear = 1;
     parameters.min_linear = 1;
@@ -997,12 +1011,9 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
             ? fetch.min_filter
             : binding.min_filter;
     parameters.min_linear = min_filter == xenos::TextureFilter::kLinear;
-    xenos::TextureFilter mip_filter =
-        binding.mip_filter == xenos::TextureFilter::kUseFetchConst
-            ? fetch.mip_filter
-            : binding.mip_filter;
     parameters.mip_linear = mip_filter == xenos::TextureFilter::kLinear;
   }
+  parameters.mip_base_map = mip_filter == xenos::TextureFilter::kBaseMap;
 
   return parameters;
 }
@@ -1046,24 +1057,57 @@ void D3D12TextureCache::WriteSampler(SamplerParameters parameters,
   desc.AddressU = kAddressModeMap[uint32_t(parameters.clamp_x)];
   desc.AddressV = kAddressModeMap[uint32_t(parameters.clamp_y)];
   desc.AddressW = kAddressModeMap[uint32_t(parameters.clamp_z)];
-  // LOD is calculated in shaders.
+  // LOD biasing is performed in shaders.
   desc.MipLODBias = 0.0f;
   desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-  // TODO(Triang3l): Border colors k_ACBYCR_BLACK and k_ACBCRY_BLACK.
-  if (parameters.border_color == xenos::BorderColor::k_AGBR_White) {
-    desc.BorderColor[0] = 1.0f;
-    desc.BorderColor[1] = 1.0f;
-    desc.BorderColor[2] = 1.0f;
-    desc.BorderColor[3] = 1.0f;
-  } else {
-    desc.BorderColor[0] = 0.0f;
-    desc.BorderColor[1] = 0.0f;
-    desc.BorderColor[2] = 0.0f;
-    desc.BorderColor[3] = 0.0f;
+  switch (parameters.border_color) {
+    case xenos::BorderColor::k_ABGR_White:
+      desc.BorderColor[0] = 1.0f;
+      desc.BorderColor[1] = 1.0f;
+      desc.BorderColor[2] = 1.0f;
+      desc.BorderColor[3] = 1.0f;
+      break;
+    case xenos::BorderColor::k_ACBYCR_Black:
+      desc.BorderColor[0] = 0.5f;
+      desc.BorderColor[1] = 0.0f;
+      desc.BorderColor[2] = 0.5f;
+      desc.BorderColor[3] = 0.0f;
+      break;
+    case xenos::BorderColor::k_ACBCRY_Black:
+      desc.BorderColor[0] = 0.0f;
+      desc.BorderColor[1] = 0.5f;
+      desc.BorderColor[2] = 0.5f;
+      desc.BorderColor[3] = 0.0f;
+      break;
+    default:
+      assert_true(parameters.border_color == xenos::BorderColor::k_ABGR_Black);
+      desc.BorderColor[0] = 0.0f;
+      desc.BorderColor[1] = 0.0f;
+      desc.BorderColor[2] = 0.0f;
+      desc.BorderColor[3] = 0.0f;
+      break;
   }
   desc.MinLOD = float(parameters.mip_min_level);
-  // Maximum mip level is in the texture resource itself.
-  desc.MaxLOD = FLT_MAX;
+  if (parameters.mip_base_map) {
+    // "It is undefined whether LOD clamping based on MinLOD and MaxLOD Sampler
+    // states should happen before or after deciding if magnification is
+    // occuring" - Direct3D 11.3 Functional Specification.
+    // Using the GL_NEAREST / GL_LINEAR minification filter emulation logic
+    // described in the Vulkan VkSamplerCreateInfo specification, preserving
+    // magnification vs. minification - point mip sampling (usable only without
+    // anisotropic filtering on Direct3D 12) and MaxLOD 0.25. With anisotropic
+    // filtering, magnification vs. minification doesn't matter as the filter is
+    // always linear for both on Direct3D 12 - but linear filtering specifically
+    // is what must not be done for kBaseMap, so setting MaxLOD to MinLOD.
+    desc.MaxLOD = desc.MinLOD;
+    if (parameters.aniso_filter == xenos::AnisoFilter::kDisabled) {
+      assert_false(parameters.mip_linear);
+      desc.MaxLOD += 0.25f;
+    }
+  } else {
+    // Maximum mip level is in the texture resource itself.
+    desc.MaxLOD = FLT_MAX;
+  }
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   device->CreateSampler(&desc, handle);
 }
@@ -2168,6 +2212,22 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12TextureCache::GetTextureDescriptorCPUHandle(
           .heap_start();
   uint32_t heap_offset = descriptor_index % kSRVDescriptorCachePageSize;
   return provider.OffsetViewDescriptor(heap_start, heap_offset);
+}
+
+xenos::ClampMode D3D12TextureCache::NormalizeClampMode(
+    xenos::ClampMode clamp_mode) const {
+  if (clamp_mode == xenos::ClampMode::kClampToHalfway) {
+    // No GL_CLAMP (clamp to half edge, half border) equivalent in Direct3D 12,
+    // but there's no Direct3D 9 equivalent anyway, and too weird to be suitable
+    // for intentional real usage.
+    return xenos::ClampMode::kClampToEdge;
+  }
+  if (clamp_mode == xenos::ClampMode::kMirrorClampToHalfway ||
+      clamp_mode == xenos::ClampMode::kMirrorClampToBorder) {
+    // No Direct3D 12 equivalents.
+    return xenos::ClampMode::kMirrorClampToEdge;
+  }
+  return clamp_mode;
 }
 
 }  // namespace d3d12
