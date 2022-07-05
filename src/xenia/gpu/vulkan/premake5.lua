@@ -8,10 +8,10 @@ project("xenia-gpu-vulkan")
   language("C++")
   links({
     "fmt",
+    "glslang-spirv",
     "xenia-base",
     "xenia-gpu",
     "xenia-ui",
-    "xenia-ui-spirv",
     "xenia-ui-vulkan",
     "xxhash",
   })
@@ -20,10 +20,9 @@ project("xenia-gpu-vulkan")
   })
   local_platform_files()
   files({
-    "shaders/bytecode/vulkan_spirv/*.h",
+    "../shaders/bytecode/vulkan_spirv/*.h",
   })
 
--- TODO(benvanik): kill this and move to the debugger UI.
 group("src")
 project("xenia-gpu-vulkan-trace-viewer")
   uuid("86a1dddc-a26a-4885-8c55-cf745225d93e")
@@ -42,7 +41,6 @@ project("xenia-gpu-vulkan-trace-viewer")
     "xenia-hid-nop",
     "xenia-kernel",
     "xenia-ui",
-    "xenia-ui-spirv",
     "xenia-ui-vulkan",
     "xenia-vfs",
   })
@@ -56,7 +54,6 @@ project("xenia-gpu-vulkan-trace-viewer")
     "libavutil",
     "mspack",
     "snappy",
-    "spirv-tools",
     "xxhash",
   })
   includedirs({
@@ -75,12 +72,6 @@ project("xenia-gpu-vulkan-trace-viewer")
     })
 
   filter("platforms:Windows")
-    links({
-      "xenia-apu-xaudio2",
-      "xenia-hid-winkey",
-      "xenia-hid-xinput",
-    })
-
     -- Only create the .user file if it doesn't already exist.
     local user_file = project_root.."/build/xenia-gpu-vulkan-trace-viewer.vcxproj.user"
     if not os.isfile(user_file) then
@@ -109,7 +100,6 @@ project("xenia-gpu-vulkan-trace-dump")
     "xenia-hid-nop",
     "xenia-kernel",
     "xenia-ui",
-    "xenia-ui-spirv",
     "xenia-ui-vulkan",
     "xenia-vfs",
   })
@@ -123,7 +113,6 @@ project("xenia-gpu-vulkan-trace-dump")
     "libavutil",
     "mspack",
     "snappy",
-    "spirv-tools",
     "xxhash",
   })
   includedirs({
