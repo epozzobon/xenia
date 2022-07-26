@@ -72,8 +72,21 @@ enum class PrimitiveType : uint32_t {
   k2DTriStrip = 0x16,
 
   // Tessellation patches when VGT_OUTPUT_PATH_CNTL::path_select is
-  // VGTOutputPath::kTessellationEnable. The vertex shader receives patch index
-  // rather than control point indices.
+  // VGTOutputPath::kTessellationEnable. The vertex shader receives the patch
+  // index rather than control point indices.
+  // With non-adaptive tessellation, VGT_DRAW_INITIATOR::num_indices is the
+  // patch count (4D5307F1 draws single ground patches by passing 1 as the index
+  // count). VGT_INDX_OFFSET is also applied to the patch index - 4D5307F1 uses
+  // auto-indexed patches with a nonzero VGT_INDX_OFFSET, which contains the
+  // base patch index there.
+  // With adaptive tessellation, however, num_indices is the number of
+  // tessellation factors in the "index buffer" reused for tessellation factors,
+  // which is the patch count multiplied by the edge count (if num_indices is
+  // multiplied further by 4 for quad patches for the ground in 4D5307F2, for
+  // example, some incorrect patches are drawn, so Xenia shouldn't do that; also
+  // 4D5307E6 draws water triangle patches with the number of indices that is 3
+  // times the invocation count of the memexporting shader that calculates the
+  // tessellation factors for a single patch for each "point").
   kLinePatch = 0x10,
   kTrianglePatch = 0x11,
   kQuadPatch = 0x12,
@@ -195,6 +208,7 @@ enum class Endian128 : uint32_t {
 
 enum class IndexFormat : uint32_t {
   kInt16,
+  // Not very common, but used for some world draws in 545407E0.
   kInt32,
 };
 
@@ -253,6 +267,23 @@ enum class SurfaceNumberFormat : uint32_t {
 // specific depth/stencil values by drawing to a depth buffer's memory through a
 // color render target (to reupload a depth/stencil surface previously evicted
 // from the EDRAM to the main memory, for instance).
+//
+// EDRAM addressing is circular - a render target may be backed by a EDRAM range
+// that extends beyond 2048 tiles, in which case, what would go to the tile 2048
+// will actually be in tile 0, tile 2049 will go to tile 1, and so on. 4D5307F1
+// heavily relies on this behavior for its depth buffer. Specifically, it's used
+// the following way:
+// - First, a depth-only 1120x720 2xMSAA pass is performed with the depth buffer
+//   in tiles [1008, 2268), or [1008, 2048) and [0, 220).
+// - Then, the depth buffer in [1008, 2268) is resolved into a texture, later
+//   used in screen-space effects.
+// - The upper 1120x576 bin is drawn into the color buffer in [0, 1008), using
+//   the [1008, 2016) portion of the previously populated depth buffer for early
+//   depth testing (there seems to be no true early Z on the Xenos, only early
+//   hi-Z, but still it possibly needs to be in sync with the per-sample depth
+//   buffer), and overwriting the tail of the previously filled depth buffer in
+//   [0, 220).
+// - The lower 1120x144 bin is drawn without the pregenerated depth buffer data.
 
 enum class MsaaSamples : uint32_t {
   k1X = 0,
@@ -388,9 +419,9 @@ constexpr uint32_t kEdramSizeBytes = kEdramTileCount * kEdramTileHeightSamples *
 
 // RB_SURFACE_INFO::surface_pitch width.
 constexpr uint32_t kEdramPitchPixelsBits = 14;
-// RB_COLOR_INFO::color_base/RB_DEPTH_INFO::depth_base width (though for the
-// Xbox 360 only 11 make sense, but to avoid bounds checks).
-constexpr uint32_t kEdramBaseTilesBits = 12;
+// The part of RB_COLOR_INFO::color_base and RB_DEPTH_INFO::depth_base width
+// usable on the Xenos, which has periodic 11-bit EDRAM tile addressing.
+constexpr uint32_t kEdramBaseTilesBits = 11;
 
 constexpr uint32_t GetSurfacePitchTiles(uint32_t pitch_pixels,
                                         MsaaSamples msaa_samples,

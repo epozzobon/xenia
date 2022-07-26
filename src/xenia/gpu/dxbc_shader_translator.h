@@ -1106,8 +1106,6 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
   // Mask of domain location actually used in the domain shader.
   uint32_t in_domain_location_used_;
-  // Whether the primitive ID has been used in the domain shader.
-  bool in_primitive_id_used_;
   // Whether kInRegisterDSControlPointIndex has been used in the shader.
   bool in_control_point_index_used_;
   // Mask of the pixel/sample position actually used in the pixel shader.
@@ -1143,7 +1141,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // 8:11 - Whether color buffers have been written to, if not written on the
   //        taken execution path, don't export according to Direct3D 9 register
   //        documentation (some games rely on this behavior).
-  // Y - Absolute resolution-scaled EDRAM offset for depth / stencil, in dwords.
+  // Y - Absolute resolution-scaled EDRAM offset for depth / stencil, in dwords,
+  //     before and during depth testing. During color writing, when the depth /
+  //     stencil address is not needed anymore, current color sample address.
   // Z - Base-relative resolution-scaled EDRAM offset for 32bpp color data, in
   //     dwords.
   // W - Base-relative resolution-scaled EDRAM offset for 64bpp color data, in
