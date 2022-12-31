@@ -184,29 +184,38 @@ void ImGuiDrawer::Initialize() {
   style.Colors[ImGuiCol_TextSelectedBg] = ImVec4(0.00f, 1.00f, 0.00f, 0.21f);
   style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.35f);
 
-  io.KeyMap[ImGuiKey_Tab] = int(ui::VirtualKey::kTab);
-  io.KeyMap[ImGuiKey_LeftArrow] = int(ui::VirtualKey::kLeft);
-  io.KeyMap[ImGuiKey_RightArrow] = int(ui::VirtualKey::kRight);
-  io.KeyMap[ImGuiKey_UpArrow] = int(ui::VirtualKey::kUp);
-  io.KeyMap[ImGuiKey_DownArrow] = int(ui::VirtualKey::kDown);
-  io.KeyMap[ImGuiKey_Home] = int(ui::VirtualKey::kHome);
-  io.KeyMap[ImGuiKey_End] = int(ui::VirtualKey::kEnd);
-  io.KeyMap[ImGuiKey_Delete] = int(ui::VirtualKey::kDelete);
-  io.KeyMap[ImGuiKey_Backspace] = int(ui::VirtualKey::kBack);
-  io.KeyMap[ImGuiKey_Enter] = int(ui::VirtualKey::kReturn);
-  io.KeyMap[ImGuiKey_Escape] = int(ui::VirtualKey::kEscape);
-  io.KeyMap[ImGuiKey_A] = int(ui::VirtualKey::kA);
-  io.KeyMap[ImGuiKey_C] = int(ui::VirtualKey::kC);
-  io.KeyMap[ImGuiKey_V] = int(ui::VirtualKey::kV);
-  io.KeyMap[ImGuiKey_X] = int(ui::VirtualKey::kX);
-  io.KeyMap[ImGuiKey_Y] = int(ui::VirtualKey::kY);
-  io.KeyMap[ImGuiKey_Z] = int(ui::VirtualKey::kZ);
-
   frame_time_tick_frequency_ = double(Clock::QueryHostTickFrequency());
   last_frame_time_ticks_ = Clock::QueryHostTickCount();
 
   touch_pointer_id_ = TouchEvent::kPointerIDNone;
   reset_mouse_position_after_next_frame_ = false;
+}
+
+std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
+  static const std::map<VirtualKey, ImGuiKey> map = {
+      {ui::VirtualKey::kTab, ImGuiKey_Tab},
+      {ui::VirtualKey::kLeft, ImGuiKey_LeftArrow},
+      {ui::VirtualKey::kRight, ImGuiKey_RightArrow},
+      {ui::VirtualKey::kUp, ImGuiKey_UpArrow},
+      {ui::VirtualKey::kDown, ImGuiKey_DownArrow},
+      {ui::VirtualKey::kHome, ImGuiKey_Home},
+      {ui::VirtualKey::kEnd, ImGuiKey_End},
+      {ui::VirtualKey::kDelete, ImGuiKey_Delete},
+      {ui::VirtualKey::kBack, ImGuiKey_Backspace},
+      {ui::VirtualKey::kReturn, ImGuiKey_Enter},
+      {ui::VirtualKey::kEscape, ImGuiKey_Escape},
+      {ui::VirtualKey::kA, ImGuiKey_A},
+      {ui::VirtualKey::kC, ImGuiKey_C},
+      {ui::VirtualKey::kV, ImGuiKey_V},
+      {ui::VirtualKey::kX, ImGuiKey_X},
+      {ui::VirtualKey::kY, ImGuiKey_Y},
+      {ui::VirtualKey::kZ, ImGuiKey_Z},
+  };
+  if (auto search = map.find(vkey); search != map.end()) {
+    return search->second;
+  } else {
+    return std::nullopt;
+  }
 }
 
 void ImGuiDrawer::SetupFontTexture() {
@@ -336,14 +345,13 @@ void ImGuiDrawer::RenderDrawLists(ImDrawData* data,
     batch.index_count = cmd_list->IdxBuffer.size();
     immediate_drawer_->BeginDrawBatch(batch);
 
-    int index_offset = 0;
     for (int j = 0; j < cmd_list->CmdBuffer.size(); ++j) {
       const auto& cmd = cmd_list->CmdBuffer[j];
 
       ImmediateDraw draw;
       draw.primitive_type = ImmediatePrimitiveType::kTriangles;
       draw.count = cmd.ElemCount;
-      draw.index_offset = index_offset;
+      draw.index_offset = cmd.IdxOffset;
       draw.texture = reinterpret_cast<ImmediateTexture*>(cmd.TextureId);
       draw.scissor = true;
       draw.scissor_left = cmd.ClipRect.x;
@@ -351,8 +359,6 @@ void ImGuiDrawer::RenderDrawLists(ImDrawData* data,
       draw.scissor_right = cmd.ClipRect.z;
       draw.scissor_bottom = cmd.ClipRect.w;
       immediate_drawer_->Draw(draw);
-
-      index_offset += cmd.ElemCount;
     }
 
     immediate_drawer_->EndDrawBatch();
@@ -487,13 +493,7 @@ void ImGuiDrawer::ClearInput() {
   }
   io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
   std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
-  io.MouseWheel = 0.0f;
-  io.MouseWheelH = 0.0f;
-  io.KeyCtrl = false;
-  io.KeyShift = false;
-  io.KeyAlt = false;
-  io.KeySuper = false;
-  std::memset(io.KeysDown, 0, sizeof(io.KeysDown));
+  io.ClearInputKeys();
   io.ClearInputCharacters();
   touch_pointer_id_ = TouchEvent::kPointerIDNone;
   reset_mouse_position_after_next_frame_ = false;
@@ -501,9 +501,9 @@ void ImGuiDrawer::ClearInput() {
 
 void ImGuiDrawer::OnKey(KeyEvent& e, bool is_down) {
   auto& io = GetIO();
-  VirtualKey virtual_key = e.virtual_key();
-  if (size_t(virtual_key) < xe::countof(io.KeysDown)) {
-    io.KeysDown[size_t(virtual_key)] = is_down;
+  const VirtualKey virtual_key = e.virtual_key();
+  if (auto imGuiKey = VirtualKeyToImGuiKey(virtual_key); imGuiKey) {
+    io.AddKeyEvent(*imGuiKey, is_down);
   }
   switch (virtual_key) {
     case VirtualKey::kShift:
