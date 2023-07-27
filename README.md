@@ -23,7 +23,7 @@ Discussing illegal activities will get you banned.
 
 Buildbot | Status | Releases
 -------- | ------ | --------
-[Windows](https://ci.appveyor.com/project/epozzobon/xenia/branch/stfs-writer) | [![Build status](https://ci.appveyor.com/api/projects/status/l67qt25j0v0tgt7x?svg=true)](https://ci.appveyor.com/project/epozzobon/xenia/branch/stfs-writer) | [Latest](https://github.com/epozzobon/xenia/releases/latest) ◦ [All](https://github.com/xenia-project/release-builds-windows/releases)
+[Windows](https://ci.appveyor.com/project/epozzobon/xenia/branch/stfs-writer) | [![Build status](https://ci.appveyor.com/api/projects/status/l67qt25j0v0tgt7x?svg=true)](https://ci.appveyor.com/project/epozzobon/xenia/branch/stfs-writer) | [Latest](https://github.com/epozzobon/xenia/releases/latest) ◦ [All](https://github.com/epozzobon/xenia/releases)
 [Linux](https://cloud.drone.io/epozzobon/xenia) | [![Build status](https://cloud.drone.io/api/badges/epozzobon/xenia/status.svg)](https://cloud.drone.io/epozzobon/xenia)
 
 Quite a few real games run. Quite a few don't.
