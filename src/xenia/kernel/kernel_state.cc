@@ -112,6 +112,26 @@ std::string KernelState::title_name() const {
   return title_name;
 }
 
+util::XdbfGameData KernelState::title_xdbf() const {
+  return module_xdbf(executable_module_);
+}
+
+util::XdbfGameData KernelState::module_xdbf(
+    object_ref<UserModule> exec_module) const {
+  assert_not_null(exec_module);
+
+  uint32_t resource_data = 0;
+  uint32_t resource_size = 0;
+  if (XSUCCEEDED(exec_module->GetSection(
+          fmt::format("{:08X}", exec_module->title_id()).c_str(),
+          &resource_data, &resource_size))) {
+    util::XdbfGameData db(memory()->TranslateVirtual(resource_data),
+                          resource_size);
+    return db;
+  }
+  return util::XdbfGameData(nullptr, resource_size);
+}
+
 uint32_t KernelState::process_type() const {
   auto pib =
       memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
@@ -126,7 +146,17 @@ void KernelState::set_process_type(uint32_t value) {
 
 uint32_t KernelState::AllocateTLS() { return uint32_t(tls_bitmap_.Acquire()); }
 
-void KernelState::FreeTLS(uint32_t slot) { tls_bitmap_.Release(slot); }
+void KernelState::FreeTLS(uint32_t slot) {
+  const std::vector<object_ref<XThread>> threads =
+      object_table()->GetObjectsByType<XThread>();
+
+  for (const object_ref<XThread>& thread : threads) {
+    if (thread->is_guest_thread()) {
+      thread->SetTLSValue(slot, 0);
+    }
+  }
+  tls_bitmap_.Release(slot);
+}
 
 void KernelState::RegisterTitleTerminateNotification(uint32_t routine,
                                                      uint32_t priority) {

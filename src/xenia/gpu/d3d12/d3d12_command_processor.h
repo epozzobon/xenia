@@ -14,9 +14,11 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "xenia/base/assert.h"
 #include "xenia/gpu/command_processor.h"
@@ -24,9 +26,9 @@
 #include "xenia/gpu/d3d12/d3d12_primitive_processor.h"
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
+#include "xenia/gpu/d3d12/d3d12_texture_cache.h"
 #include "xenia/gpu/d3d12/deferred_command_list.h"
 #include "xenia/gpu/d3d12/pipeline_cache.h"
-#include "xenia/gpu/d3d12/texture_cache.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/dxbc_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
@@ -128,11 +130,19 @@ class D3D12CommandProcessor : public CommandProcessor {
       uint32_t count, ui::d3d12::util::DescriptorCpuGpuHandlePair* handles_out);
   // These are needed often, so they are always allocated.
   enum class SystemBindlessView : uint32_t {
-    kSharedMemoryRawSRV,
+    // Both may be bound as one root parameter.
+    kSharedMemoryRawSRVAndNullRawUAVStart,
+    kSharedMemoryRawSRV = kSharedMemoryRawSRVAndNullRawUAVStart,
+    kNullRawUAV,
+
+    // Both may be bound as one root parameter.
+    kNullRawSRVAndSharedMemoryRawUAVStart,
+    kNullRawSRV = kNullRawSRVAndSharedMemoryRawUAVStart,
+    kSharedMemoryRawUAV,
+
     kSharedMemoryR32UintSRV,
     kSharedMemoryR32G32UintSRV,
     kSharedMemoryR32G32B32A32UintSRV,
-    kSharedMemoryRawUAV,
     kSharedMemoryR32UintUAV,
     kSharedMemoryR32G32UintUAV,
     kSharedMemoryR32G32B32A32UintUAV,
@@ -197,9 +207,6 @@ class D3D12CommandProcessor : public CommandProcessor {
   void SetStencilReference(uint32_t stencil_ref);
   void SetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY primitive_topology);
 
-  // For the pipeline cache to call when binding layout UIDs may be reused.
-  void NotifyShaderBindingsLayoutUIDsInvalidated();
-
   // Returns the text to display in the GPU backend name in the window title.
   std::string GetWindowTitleText() const;
 
@@ -208,6 +215,9 @@ class D3D12CommandProcessor : public CommandProcessor {
   void ShutdownContext() override;
 
   void WriteRegister(uint32_t index, uint32_t value) override;
+
+  void OnGammaRamp256EntryTableValueWritten() override;
+  void OnGammaRampPWLValueWritten() override;
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
@@ -253,10 +263,10 @@ class D3D12CommandProcessor : public CommandProcessor {
     kRootParameter_Bindful_SystemConstants,  // +2 = 6 in all.
     // Pretty rarely used and rarely changed - flow control constants.
     kRootParameter_Bindful_BoolLoopConstants,  // +2 = 8 in all.
-    // Never changed except for when starting a new descriptor heap - shared
-    // memory byte address buffer, and, if ROV is used for EDRAM, EDRAM R32_UINT
-    // UAV.
-    // SRV/UAV descriptor table.
+    // Changed only when starting a new descriptor heap or when switching
+    // between shared memory as SRV and UAV - shared memory byte address buffer
+    // (as SRV and as UAV, either may be null if not used), and, if ROV is used
+    // for EDRAM, EDRAM R32_UINT UAV.
     kRootParameter_Bindful_SharedMemoryAndEdram,  // +1 = 9 in all.
 
     kRootParameter_Bindful_Count_Base,
@@ -280,10 +290,14 @@ class D3D12CommandProcessor : public CommandProcessor {
     kRootParameter_Bindless_DescriptorIndicesVertex,  // +2 = 6 in VS.
     kRootParameter_Bindless_SystemConstants,          // +2 = 8 in all.
     kRootParameter_Bindless_BoolLoopConstants,        // +2 = 10 in all.
+    // Changed only when switching between shared memory as SRV and UAV - shared
+    // memory byte address buffer (as SRV and as UAV, either may be null if not
+    // used).
+    kRootParameter_Bindless_SharedMemory,  // +1 = 11 in all.
     // Unbounded sampler descriptor table - changed in case of overflow.
-    kRootParameter_Bindless_SamplerHeap,  // +1 = 11 in all.
+    kRootParameter_Bindless_SamplerHeap,  // +1 = 12 in all.
     // Unbounded SRV/UAV descriptor table - never changed.
-    kRootParameter_Bindless_ViewHeap,  // +1 = 12 in all.
+    kRootParameter_Bindless_ViewHeap,  // +1 = 13 in all.
 
     kRootParameter_Bindless_Count,
   };
@@ -362,14 +376,8 @@ class D3D12CommandProcessor : public CommandProcessor {
                                   uint32_t normalized_color_mask);
   bool UpdateBindings(const D3D12Shader* vertex_shader,
                       const D3D12Shader* pixel_shader,
-                      ID3D12RootSignature* root_signature);
-
-  // Returns dword count for one element for a memexport format, or 0 if it's
-  // not supported by the D3D12 command processor (if it's smaller that 1 dword,
-  // for instance).
-  // TODO(Triang3l): Check if any game uses memexport with formats smaller than
-  // 32 bits per element.
-  static uint32_t GetSupportedMemExportFormatSize(xenos::ColorFormat format);
+                      ID3D12RootSignature* root_signature,
+                      bool shared_memory_is_uav);
 
   // Returns a buffer for reading GPU data back to the CPU. Assuming
   // synchronizing immediately after use. Always in COPY_DEST state.
@@ -423,6 +431,8 @@ class D3D12CommandProcessor : public CommandProcessor {
   // bindful - mainly because of CopyDescriptorsSimple, which takes the majority
   // of UpdateBindings time, and that's outside the emulator's control even).
   bool bindless_resources_used_ = false;
+
+  std::unique_ptr<D3D12SharedMemory> shared_memory_;
 
   std::unique_ptr<D3D12RenderTargetCache> render_target_cache_;
 
@@ -479,7 +489,7 @@ class D3D12CommandProcessor : public CommandProcessor {
   // number (so checking if the first can be reused is enough).
   std::deque<std::pair<ID3D12DescriptorHeap*, uint64_t>>
       sampler_bindless_heaps_overflowed_;
-  // TextureCache::SamplerParameters::value -> indices within the current
+  // D3D12TextureCache::SamplerParameters::value -> indices within the current
   // bindless sampler heap.
   std::unordered_map<uint32_t, uint32_t> texture_cache_bindless_sampler_map_;
 
@@ -488,25 +498,24 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12RootSignature* root_signature_bindless_vs_ = nullptr;
   ID3D12RootSignature* root_signature_bindless_ds_ = nullptr;
 
-  std::unique_ptr<D3D12SharedMemory> shared_memory_;
-
   std::unique_ptr<D3D12PrimitiveProcessor> primitive_processor_;
 
   std::unique_ptr<PipelineCache> pipeline_cache_;
 
-  std::unique_ptr<TextureCache> texture_cache_;
+  std::unique_ptr<D3D12TextureCache> texture_cache_;
 
-  // Bytes 0x0...0x3FF - 256-entry R10G10B10X2 gamma ramp (red and blue must be
-  // read as swapped - 535107D4 has settings allowing separate configuration).
+  // Bytes 0x0...0x3FF - 256-entry gamma ramp table with B10G10R10X2 data (read
+  // as R10G10B10X2 with swizzle).
   // Bytes 0x400...0x9FF - 128-entry PWL R16G16 gamma ramp (R - base, G - delta,
   // low 6 bits of each are zero, 3 elements per entry).
-  // https://www.x.org/docs/AMD/old/42590_m76_rrg_1.01o.pdf
   Microsoft::WRL::ComPtr<ID3D12Resource> gamma_ramp_buffer_;
   D3D12_RESOURCE_STATES gamma_ramp_buffer_state_;
   // Upload buffer for an image that is the same as gamma_ramp_, but with
   // kQueueFrames array layers.
   Microsoft::WRL::ComPtr<ID3D12Resource> gamma_ramp_upload_buffer_;
   uint8_t* gamma_ramp_upload_buffer_mapping_ = nullptr;
+  bool gamma_ramp_256_entry_table_up_to_date_ = false;
+  bool gamma_ramp_pwl_up_to_date_ = false;
 
   struct ApplyGammaConstants {
     uint32_t size[2];
@@ -561,7 +570,7 @@ class D3D12CommandProcessor : public CommandProcessor {
   // Unsubmitted barrier batch.
   std::vector<D3D12_RESOURCE_BARRIER> barriers_;
 
-  // <Resource, submission where requested>, sorted by the submission number.
+  // <Submission where requested, resource>, sorted by the submission number.
   std::deque<std::pair<uint64_t, ID3D12Resource*>> resources_for_deletion_;
 
   static constexpr uint32_t kScratchBufferSizeIncrement = 16 * 1024 * 1024;
@@ -621,6 +630,13 @@ class D3D12CommandProcessor : public CommandProcessor {
   ConstantBufferBinding cbuffer_binding_descriptor_indices_vertex_;
   ConstantBufferBinding cbuffer_binding_descriptor_indices_pixel_;
 
+  // Whether the latest shared memory and EDRAM buffer binding contains the
+  // shared memory UAV rather than the SRV.
+  // Separate descriptor tables for the SRV and the UAV, even though only one is
+  // accessed dynamically in the shaders, are used to prevent a validation
+  // message about missing resource states in PIX.
+  std::optional<bool> current_shared_memory_binding_is_uav_;
+
   // Pages with the descriptors currently used for handling Xenos draw calls.
   uint64_t draw_view_bindful_heap_index_;
   uint64_t draw_sampler_bindful_heap_index_;
@@ -644,15 +660,17 @@ class D3D12CommandProcessor : public CommandProcessor {
   // Size of these should be ignored when checking whether these are up to date,
   // layout UID should be checked first (they will be different for different
   // binding counts).
-  std::vector<TextureCache::TextureSRVKey> current_texture_srv_keys_vertex_;
-  std::vector<TextureCache::TextureSRVKey> current_texture_srv_keys_pixel_;
-  std::vector<TextureCache::SamplerParameters> current_samplers_vertex_;
-  std::vector<TextureCache::SamplerParameters> current_samplers_pixel_;
+  std::vector<D3D12TextureCache::TextureSRVKey>
+      current_texture_srv_keys_vertex_;
+  std::vector<D3D12TextureCache::TextureSRVKey> current_texture_srv_keys_pixel_;
+  std::vector<D3D12TextureCache::SamplerParameters> current_samplers_vertex_;
+  std::vector<D3D12TextureCache::SamplerParameters> current_samplers_pixel_;
   std::vector<uint32_t> current_sampler_bindless_indices_vertex_;
   std::vector<uint32_t> current_sampler_bindless_indices_pixel_;
 
   // Latest bindful descriptor handles used for handling Xenos draw calls.
-  D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle_shared_memory_and_edram_;
+  D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle_shared_memory_srv_and_edram_;
+  D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle_shared_memory_uav_and_edram_;
   D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle_textures_vertex_;
   D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle_textures_pixel_;
   D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle_samplers_vertex_;
@@ -660,6 +678,9 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   // Current primitive topology.
   D3D_PRIMITIVE_TOPOLOGY primitive_topology_;
+
+  // Temporary storage for memexport stream constants used in the draw.
+  std::vector<draw_util::MemExportRange> memexport_ranges_;
 };
 
 }  // namespace d3d12

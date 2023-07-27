@@ -9,8 +9,11 @@
 
 #include "xenia/gpu/trace_player.h"
 
+#include <memory>
+
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
 
@@ -32,8 +35,6 @@ TracePlayer::TracePlayer(GraphicsSystem* graphics_system)
   playback_event_ = xe::threading::Event::CreateAutoResetEvent(false);
   assert_not_null(playback_event_);
 }
-
-TracePlayer::~TracePlayer() { delete[] edram_snapshot_; }
 
 const TraceReader::Frame* TracePlayer::current_frame() const {
   if (current_frame_index_ >= frame_count()) {
@@ -88,28 +89,20 @@ void TracePlayer::PlayTrace(const uint8_t* trace_data, size_t trace_size,
                             TracePlaybackMode playback_mode,
                             bool clear_caches) {
   playing_trace_ = true;
-  // Pass a copy of present_last_copy_ to the thread so it's not accessible by
-  // multiple threads at once.
-  bool present_last_copy = present_last_copy_;
   graphics_system_->command_processor()->CallInThread([=]() {
-    PlayTraceOnThread(trace_data, trace_size, playback_mode, clear_caches,
-                      present_last_copy);
+    PlayTraceOnThread(trace_data, trace_size, playback_mode, clear_caches);
   });
 }
 
 void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
                                     size_t trace_size,
                                     TracePlaybackMode playback_mode,
-                                    bool clear_caches, bool present_last_copy) {
+                                    bool clear_caches) {
   auto memory = graphics_system_->memory();
   auto command_processor = graphics_system_->command_processor();
 
   if (clear_caches) {
     command_processor->ClearCaches();
-  }
-
-  if (present_last_copy) {
-    command_processor->SetIgnoreSwap(true);
   }
 
   playback_percent_ = 0;
@@ -197,13 +190,12 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
       case TraceCommandType::kEdramSnapshot: {
         auto cmd = reinterpret_cast<const EdramSnapshotCommand*>(trace_ptr);
         trace_ptr += sizeof(*cmd);
-        if (!edram_snapshot_) {
-          edram_snapshot_ = new uint8_t[xenos::kEdramSizeBytes];
-        }
+        std::unique_ptr<uint8_t[]> edram_snapshot(
+            new uint8_t[xenos::kEdramSizeBytes]);
         DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
-                         edram_snapshot_, xenos::kEdramSizeBytes);
+                         edram_snapshot.get(), xenos::kEdramSizeBytes);
         trace_ptr += cmd->encoded_length;
-        command_processor->RestoreEdramSnapshot(edram_snapshot_);
+        command_processor->RestoreEdramSnapshot(edram_snapshot.get());
         break;
       }
       case TraceCommandType::kEvent: {
@@ -219,15 +211,38 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
         }
         break;
       }
+      case TraceCommandType::kRegisters: {
+        auto cmd = reinterpret_cast<const RegistersCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd);
+        std::unique_ptr<uint32_t[]> register_values(
+            new uint32_t[cmd->register_count]);
+        DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
+                         register_values.get(),
+                         sizeof(uint32_t) * cmd->register_count);
+        trace_ptr += cmd->encoded_length;
+        command_processor->RestoreRegisters(
+            cmd->first_register, register_values.get(), cmd->register_count,
+            cmd->execute_callbacks);
+        break;
+      }
+      case TraceCommandType::kGammaRamp: {
+        auto cmd = reinterpret_cast<const GammaRampCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd);
+        std::unique_ptr<uint32_t[]> gamma_ramps(new uint32_t[256 + 3 * 128]);
+        DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
+                         gamma_ramps.get(), sizeof(uint32_t) * (256 + 3 * 128));
+        trace_ptr += cmd->encoded_length;
+        command_processor->RestoreGammaRamp(
+            reinterpret_cast<const reg::DC_LUT_30_COLOR*>(gamma_ramps.get()),
+            reinterpret_cast<const reg::DC_LUT_PWL_DATA*>(gamma_ramps.get() +
+                                                          256),
+            cmd->rw_component);
+        break;
+      }
     }
   }
 
   playing_trace_ = false;
-
-  if (present_last_copy) {
-    command_processor->SetIgnoreSwap(false);
-    command_processor->IssueSwap(0, 1280, 720);
-  }
 
   playback_event_->Set();
 }

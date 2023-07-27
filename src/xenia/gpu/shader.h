@@ -22,6 +22,7 @@
 #include "xenia/base/byte_order.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/ucode.h"
 #include "xenia/gpu/xenos.h"
 
@@ -652,22 +653,44 @@ void ParseAluInstruction(const ucode::AluInstruction& op,
 
 class Shader {
  public:
-  // Type of the vertex shader in a D3D11-like rendering pipeline - shader
-  // interface depends on in, so it must be known at translation time.
-  // If values are changed, INVALIDATE SHADER STORAGES (increase their version
-  // constexpr) where those are stored! And check bit count where this is
-  // packed. This is : uint32_t for simplicity of packing in bit fields.
+  // Type of the vertex shader on the host - shader interface depends on in, so
+  // it must be known at translation time. If values are changed, INVALIDATE
+  // SHADER STORAGES (increase their version constexpr) where those are stored!
+  // And check bit count where this is packed. This is : uint32_t for simplicity
+  // of packing in bit fields.
   enum class HostVertexShaderType : uint32_t {
     kVertex,
-    kLineDomainCPIndexed,
+
+    kDomainStart,
+    kLineDomainCPIndexed = kDomainStart,
     kLineDomainPatchIndexed,
     kTriangleDomainCPIndexed,
     kTriangleDomainPatchIndexed,
     kQuadDomainCPIndexed,
     kQuadDomainPatchIndexed,
+    kDomainEnd,
+
+    // For implementation without unconditional support for memory writes from
+    // vertex shaders, vertex shader converted to a compute shader doing only
+    // memory export.
+    kMemExportCompute,
+
+    // 4 host vertices for 1 guest vertex, for implementations without
+    // unconditional geometry shader support.
+    kPointListAsTriangleStrip,
+    // 3 guest vertices processed by the host shader invocation to choose the
+    // strip orientation, for implementations without unconditional geometry
+    // shader support.
+    kRectangleListAsTriangleStrip,
   };
   // For packing HostVertexShaderType in bit fields.
-  static constexpr uint32_t kHostVertexShaderTypeBitCount = 3;
+  static constexpr uint32_t kHostVertexShaderTypeBitCount = 4;
+
+  static constexpr bool IsHostVertexShaderTypeDomain(
+      HostVertexShaderType host_vertex_shader_type) {
+    return host_vertex_shader_type >= HostVertexShaderType::kDomainStart &&
+           host_vertex_shader_type < HostVertexShaderType::kDomainEnd;
+  }
 
   struct Error {
     bool is_fatal = false;
@@ -747,9 +770,16 @@ class Shader {
     }
   };
 
-  // Based on the number of AS_VS/PS_EXPORT_STREAM_* enum sets found in a game
-  // .pdb.
-  static constexpr uint32_t kMaxMemExports = 16;
+  struct ControlFlowMemExportInfo {
+    // Which eM elements have potentially (regardless of conditionals, loop
+    // iteration counts, predication) been written earlier in the predecessor
+    // graph of the instruction since an `alloc export`.
+    uint8_t eM_potentially_written_before = 0;
+    // For exec sequences, which eM elements are potentially (regardless of
+    // predication) written by the instructions in the sequence. For other
+    // control flow instructions, it's 0.
+    uint8_t eM_potentially_written_by_exec = 0;
+  };
 
   class Translation {
    public:
@@ -797,6 +827,9 @@ class Shader {
    protected:
     Translation(Shader& shader, uint64_t modification)
         : shader_(shader), modification_(modification) {}
+
+    // If there was some failure during preparation on the implementation side.
+    void MakeInvalid() { is_valid_ = false; }
 
    private:
     friend class Shader;
@@ -854,18 +887,20 @@ class Shader {
     return constant_register_map_;
   }
 
-  // uint5[Shader::kMaxMemExports] - bits indicating which eM# registers have
-  // been written to after each `alloc export`, for up to Shader::kMaxMemExports
-  // exports. This will contain zero for certain corrupt exports - for those to
-  // which a valid eA was not written via a MAD with a stream constant.
-  const uint8_t* memexport_eM_written() const { return memexport_eM_written_; }
+  // Information about memory export state at each control flow instruction. May
+  // be empty if there are no eM# writes.
+  const std::vector<ControlFlowMemExportInfo>& cf_memexport_info() const {
+    return cf_memexport_info_;
+  }
 
-  // All c# registers used as the addend in MAD operations to eA.
+  uint8_t memexport_eM_written() const { return memexport_eM_written_; }
+  uint8_t memexport_eM_potentially_written_before_end() const {
+    return memexport_eM_potentially_written_before_end_;
+  }
+
+  // c# registers used as the addend in MAD operations to eA.
   const std::set<uint32_t>& memexport_stream_constants() const {
     return memexport_stream_constants_;
-  }
-  bool is_valid_memexport_used() const {
-    return !memexport_stream_constants_.empty();
   }
 
   // Labels that jumps (explicit or from loops) can be done to.
@@ -914,6 +949,27 @@ class Shader {
   // True if the current shader has any `kill` instructions.
   bool kills_pixels() const { return kills_pixels_; }
 
+  // True if the shader has any texture-related instructions (any fetch
+  // instructions other than vertex fetch) writing any non-constant components.
+  bool uses_texture_fetch_instruction_results() const {
+    return uses_texture_fetch_instruction_results_;
+  }
+
+  // Whether each interpolator is written on any execution path.
+  uint32_t writes_interpolators() const { return writes_interpolators_; }
+
+  // Whether the system vertex shader exports are written on any execution path.
+  uint32_t writes_point_size_edge_flag_kill_vertex() const {
+    return writes_point_size_edge_flag_kill_vertex_;
+  }
+
+  // Returns the mask of the interpolators the pixel shader potentially requires
+  // from the vertex shader, and also the PsParamGen destination register, or
+  // UINT32_MAX if it's not needed.
+  uint32_t GetInterpolatorInputMask(reg::SQ_PROGRAM_CNTL sq_program_cntl,
+                                    reg::SQ_CONTEXT_MISC sq_context_misc,
+                                    uint32_t& param_gen_pos_out) const;
+
   // True if the shader overrides the pixel depth.
   bool writes_depth() const { return writes_depth_; }
 
@@ -923,7 +979,7 @@ class Shader {
     // TODO(Triang3l): Investigate what happens to memexport when the pixel
     // fails the depth/stencil test, but in Direct3D 11 UAV writes disable early
     // depth/stencil.
-    return !kills_pixels() && !writes_depth() && !is_valid_memexport_used();
+    return !kills_pixels() && !writes_depth() && !memexport_eM_written();
   }
 
   // Whether each color render target is written to on any execution path.
@@ -995,15 +1051,27 @@ class Shader {
   std::vector<VertexBinding> vertex_bindings_;
   std::vector<TextureBinding> texture_bindings_;
   ConstantRegisterMap constant_register_map_ = {0};
-  uint8_t memexport_eM_written_[kMaxMemExports] = {};
-  std::set<uint32_t> memexport_stream_constants_;
   std::set<uint32_t> label_addresses_;
   uint32_t cf_pair_index_bound_ = 0;
   uint32_t register_static_address_bound_ = 0;
+  uint32_t writes_interpolators_ = 0;
+  uint32_t writes_point_size_edge_flag_kill_vertex_ = 0;
+  uint32_t writes_color_targets_ = 0b0000;
   bool uses_register_dynamic_addressing_ = false;
   bool kills_pixels_ = false;
+  bool uses_texture_fetch_instruction_results_ = false;
   bool writes_depth_ = false;
-  uint32_t writes_color_targets_ = 0b0000;
+
+  // Memory export eM write info for each control flow instruction, if there are
+  // any eM writes in the shader.
+  std::vector<ControlFlowMemExportInfo> cf_memexport_info_;
+  // Which memexport elements (eM#) are written for any memexport in the shader.
+  uint8_t memexport_eM_written_ = 0;
+  // ControlFlowMemExportInfo::eM_potentially_written_before equivalent for the
+  // end of the shader, for the last memory export (or exports if the end has
+  // multiple predecessor chains exporting to memory).
+  uint8_t memexport_eM_potentially_written_before_end_ = 0;
+  std::set<uint32_t> memexport_stream_constants_;
 
   // Modification bits -> translation.
   std::unordered_map<uint64_t, Translation*> translations_;
@@ -1014,8 +1082,7 @@ class Shader {
   void GatherExecInformation(
       const ParsedExecInstruction& instr,
       ucode::VertexFetchInstruction& previous_vfetch_full,
-      uint32_t& unique_texture_bindings, uint32_t memexport_alloc_current_count,
-      uint32_t& memexport_eA_written, StringBuffer& ucode_disasm_buffer);
+      uint32_t& unique_texture_bindings, StringBuffer& ucode_disasm_buffer);
   void GatherVertexFetchInformation(
       const ucode::VertexFetchInstruction& op,
       ucode::VertexFetchInstruction& previous_vfetch_full,
@@ -1024,13 +1091,12 @@ class Shader {
                                      uint32_t& unique_texture_bindings,
                                      StringBuffer& ucode_disasm_buffer);
   void GatherAluInstructionInformation(const ucode::AluInstruction& op,
-                                       uint32_t memexport_alloc_current_count,
-                                       uint32_t& memexport_eA_written,
+                                       uint32_t exec_cf_index,
                                        StringBuffer& ucode_disasm_buffer);
   void GatherOperandInformation(const InstructionOperand& operand);
   void GatherFetchResultInformation(const InstructionResult& result);
   void GatherAluResultInformation(const InstructionResult& result,
-                                  uint32_t memexport_alloc_current_count);
+                                  uint32_t exec_cf_index);
 };
 
 }  // namespace gpu
