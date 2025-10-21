@@ -17,6 +17,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
@@ -2098,15 +2099,15 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   ID3D12Device* device = GetD3D12Provider().GetDevice();
   const RegisterFile& regs = *register_file_;
 
-  xenos::ModeControl edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-  if (edram_mode == xenos::ModeControl::kCopy) {
+  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode == xenos::EdramMode::kCopy) {
     // Special copy handling.
     return IssueCopy();
   }
@@ -2133,9 +2134,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
   D3D12Shader* pixel_shader = nullptr;
   if (is_rasterization_done) {
-    // See xenos::ModeControl for explanation why the pixel shader is only used
+    // See xenos::EdramMode for explanation why the pixel shader is only used
     // when it's kColorDepth here.
-    if (edram_mode == xenos::ModeControl::kColorDepth) {
+    if (edram_mode == xenos::EdramMode::kColorDepth) {
       pixel_shader = static_cast<D3D12Shader*>(active_pixel_shader());
       if (pixel_shader) {
         pipeline_cache_->AnalyzeShaderUcode(*pixel_shader);
@@ -2306,8 +2307,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     while (xe::bit_scan_forward(vfetch_bits_remaining, &j)) {
       vfetch_bits_remaining &= ~(uint32_t(1) << j);
       uint32_t vfetch_index = i * 32 + j;
-      const auto& vfetch_constant = regs.Get<xenos::xe_gpu_vertex_fetch_t>(
-          XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + vfetch_index * 2);
+      xenos::xe_gpu_vertex_fetch_t vfetch_constant =
+          regs.GetVertexFetch(vfetch_index);
       switch (vfetch_constant.type) {
         case xenos::FetchConstantType::kVertex:
           break;
@@ -2593,9 +2594,9 @@ void D3D12CommandProcessor::InitializeTrace() {
 }
 
 bool D3D12CommandProcessor::IssueCopy() {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
   if (!BeginSubmission(true)) {
     return false;
   }
@@ -2732,9 +2733,9 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
 }
 
 bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   if (device_removed_) {
     return false;
@@ -3022,9 +3023,9 @@ void D3D12CommandProcessor::UpdateFixedFunctionState(
     const draw_util::ViewportInfo& viewport_info,
     const draw_util::Scissor& scissor, bool primitive_polygonal,
     reg::RB_DEPTHCONTROL normalized_depth_control) {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   // Viewport.
   D3D12_VIEWPORT viewport;
@@ -3050,10 +3051,10 @@ void D3D12CommandProcessor::UpdateFixedFunctionState(
 
     // Blend factor.
     float blend_factor[] = {
-        regs[XE_GPU_REG_RB_BLEND_RED].f32,
-        regs[XE_GPU_REG_RB_BLEND_GREEN].f32,
-        regs[XE_GPU_REG_RB_BLEND_BLUE].f32,
-        regs[XE_GPU_REG_RB_BLEND_ALPHA].f32,
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA),
     };
     // std::memcmp instead of != so in case of NaN, every draw won't be
     // invalidating it.
@@ -3092,15 +3093,15 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
     const draw_util::ViewportInfo& viewport_info, uint32_t used_texture_mask,
     reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask) {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   const RegisterFile& regs = *register_file_;
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
   auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
   auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
-  float rb_alpha_ref = regs[XE_GPU_REG_RB_ALPHA_REF].f32;
+  auto rb_alpha_ref = regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
   auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
   auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
   auto rb_stencilrefmask = regs.Get<reg::RB_STENCILREFMASK>();
@@ -3241,9 +3242,9 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
   // Tessellation factor range, plus 1.0 according to the images in
   // https://www.slideshare.net/blackdevilvikas/next-generation-graphics-programming-on-xbox-360
   float tessellation_factor_min =
-      regs[XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL].f32 + 1.0f;
+      regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
   float tessellation_factor_max =
-      regs[XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL].f32 + 1.0f;
+      regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
   dirty |= system_constants_.tessellation_factor_range_min !=
            tessellation_factor_min;
   system_constants_.tessellation_factor_range_min = tessellation_factor_min;
@@ -3280,12 +3281,12 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
     while (xe::bit_scan_forward(user_clip_planes_remaining,
                                 &user_clip_plane_index)) {
       user_clip_planes_remaining &= ~(UINT32_C(1) << user_clip_plane_index);
-      const float* user_clip_plane =
-          &regs[XE_GPU_REG_PA_CL_UCP_0_X + user_clip_plane_index * 4].f32;
-      if (std::memcmp(user_clip_plane_write_ptr, user_clip_plane,
+      const void* user_clip_plane_regs =
+          &regs[XE_GPU_REG_PA_CL_UCP_0_X + user_clip_plane_index * 4];
+      if (std::memcmp(user_clip_plane_write_ptr, user_clip_plane_regs,
                       4 * sizeof(float))) {
         dirty = true;
-        std::memcpy(user_clip_plane_write_ptr, user_clip_plane,
+        std::memcpy(user_clip_plane_write_ptr, user_clip_plane_regs,
                     4 * sizeof(float));
       }
       user_clip_plane_write_ptr += 4;
@@ -3423,9 +3424,8 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
         color_exp_bias -= 5;
       }
     }
-    float color_exp_bias_scale;
-    *reinterpret_cast<int32_t*>(&color_exp_bias_scale) =
-        0x3F800000 + (color_exp_bias << 23);
+    auto color_exp_bias_scale = xe::memory::Reinterpret<float>(
+        int32_t(0x3F800000 + (color_exp_bias << 23)));
     dirty |= system_constants_.color_exp_bias[i] != color_exp_bias_scale;
     system_constants_.color_exp_bias[i] = color_exp_bias_scale;
     if (edram_rov_used) {
@@ -3454,7 +3454,7 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
         std::memcpy(system_constants_.edram_rt_clamp[i], rt_clamp[i],
                     4 * sizeof(float));
         uint32_t blend_factors_ops =
-            regs[reg::RB_BLENDCONTROL::rt_register_indices[i]].u32 & 0x1FFF1FFF;
+            regs[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF;
         dirty |= system_constants_.edram_rt_blend_factors_ops[i] !=
                  blend_factors_ops;
         system_constants_.edram_rt_blend_factors_ops[i] = blend_factors_ops;
@@ -3477,22 +3477,22 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
     if (primitive_polygonal) {
       if (pa_su_sc_mode_cntl.poly_offset_front_enable) {
         poly_offset_front_scale =
-            regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
+            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
         poly_offset_front_offset =
-            regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
+            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
       }
       if (pa_su_sc_mode_cntl.poly_offset_back_enable) {
         poly_offset_back_scale =
-            regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE].f32;
+            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE);
         poly_offset_back_offset =
-            regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET].f32;
+            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET);
       }
     } else {
       if (pa_su_sc_mode_cntl.poly_offset_para_enable) {
         poly_offset_front_scale =
-            regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
+            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
         poly_offset_front_offset =
-            regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
+            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
         poly_offset_back_scale = poly_offset_front_scale;
         poly_offset_back_offset = poly_offset_front_offset;
       }
@@ -3567,21 +3567,21 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
     }
 
     dirty |= system_constants_.edram_blend_constant[0] !=
-             regs[XE_GPU_REG_RB_BLEND_RED].f32;
+             regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
     system_constants_.edram_blend_constant[0] =
-        regs[XE_GPU_REG_RB_BLEND_RED].f32;
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
     dirty |= system_constants_.edram_blend_constant[1] !=
-             regs[XE_GPU_REG_RB_BLEND_GREEN].f32;
+             regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
     system_constants_.edram_blend_constant[1] =
-        regs[XE_GPU_REG_RB_BLEND_GREEN].f32;
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
     dirty |= system_constants_.edram_blend_constant[2] !=
-             regs[XE_GPU_REG_RB_BLEND_BLUE].f32;
+             regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
     system_constants_.edram_blend_constant[2] =
-        regs[XE_GPU_REG_RB_BLEND_BLUE].f32;
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
     dirty |= system_constants_.edram_blend_constant[3] !=
-             regs[XE_GPU_REG_RB_BLEND_ALPHA].f32;
+             regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
     system_constants_.edram_blend_constant[3] =
-        regs[XE_GPU_REG_RB_BLEND_ALPHA].f32;
+        regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
   }
 
   cbuffer_binding_system_.up_to_date &= !dirty;
@@ -3595,9 +3595,9 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
   ID3D12Device* device = provider.GetDevice();
   const RegisterFile& regs = *register_file_;
 
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   // Set the new root signature.
   if (current_graphics_root_signature_ != root_signature) {
@@ -3638,10 +3638,10 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
   // These are the constant base addresses/ranges for shaders.
   // We have these hardcoded right now cause nothing seems to differ on the Xbox
   // 360 (however, OpenGL ES on Adreno 200 on Android has different ranges).
-  assert_true(regs[XE_GPU_REG_SQ_VS_CONST].u32 == 0x000FF000 ||
-              regs[XE_GPU_REG_SQ_VS_CONST].u32 == 0x00000000);
-  assert_true(regs[XE_GPU_REG_SQ_PS_CONST].u32 == 0x000FF100 ||
-              regs[XE_GPU_REG_SQ_PS_CONST].u32 == 0x00000000);
+  assert_true(regs[XE_GPU_REG_SQ_VS_CONST] == 0x000FF000 ||
+              regs[XE_GPU_REG_SQ_VS_CONST] == 0x00000000);
+  assert_true(regs[XE_GPU_REG_SQ_PS_CONST] == 0x000FF100 ||
+              regs[XE_GPU_REG_SQ_PS_CONST] == 0x00000000);
   // Check if the float constant layout is still the same and get the counts.
   const Shader::ConstantRegisterMap& float_constant_map_vertex =
       vertex_shader->constant_register_map();
@@ -3715,8 +3715,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
         float_constant_map_entry &= ~(1ull << float_constant_index);
         std::memcpy(float_constants,
                     &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) +
-                          (float_constant_index << 2)]
-                         .f32,
+                          (float_constant_index << 2)],
                     4 * sizeof(float));
         float_constants += 4 * sizeof(float);
       }
@@ -3746,8 +3745,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
           float_constant_map_entry &= ~(1ull << float_constant_index);
           std::memcpy(float_constants,
                       &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) +
-                            (float_constant_index << 2)]
-                           .f32,
+                            (float_constant_index << 2)],
                       4 * sizeof(float));
           float_constants += 4 * sizeof(float);
         }
@@ -3767,7 +3765,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       return false;
     }
     std::memcpy(bool_loop_constants,
-                &regs[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031].u32,
+                &regs[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
                 kBoolLoopConstantsSize);
     cbuffer_binding_bool_loop_.up_to_date = true;
     current_graphics_root_up_to_date_ &=
@@ -3782,8 +3780,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
     if (fetch_constants == nullptr) {
       return false;
     }
-    std::memcpy(fetch_constants,
-                &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0].u32,
+    std::memcpy(fetch_constants, &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
                 kFetchConstantsSize);
     cbuffer_binding_fetch_.up_to_date = true;
     current_graphics_root_up_to_date_ &=

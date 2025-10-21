@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -41,12 +40,12 @@ namespace draw_util {
 
 bool IsRasterizationPotentiallyDone(const RegisterFile& regs,
                                     bool primitive_polygonal) {
-  // TODO(Triang3l): Investigate ModeControl::kIgnore better, with respect to
+  // TODO(Triang3l): Investigate EdramMode::kNoOperation better, with respect to
   // sample counting. Let's assume sample counting is a part of depth / stencil,
   // thus disabled too.
-  xenos::ModeControl edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-  if (edram_mode != xenos::ModeControl::kColorDepth &&
-      edram_mode != xenos::ModeControl::kDepth) {
+  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EdramMode::kColorDepth &&
+      edram_mode != xenos::EdramMode::kDepthOnly) {
     return false;
   }
   if (regs.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode ==
@@ -65,9 +64,9 @@ bool IsRasterizationPotentiallyDone(const RegisterFile& regs,
 }
 
 reg::RB_DEPTHCONTROL GetNormalizedDepthControl(const RegisterFile& regs) {
-  xenos::ModeControl edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-  if (edram_mode != xenos::ModeControl::kColorDepth &&
-      edram_mode != xenos::ModeControl::kDepth) {
+  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EdramMode::kColorDepth &&
+      edram_mode != xenos::EdramMode::kDepthOnly) {
     // Both depth and stencil disabled (EDRAM depth and stencil ignored).
     reg::RB_DEPTHCONTROL disabled;
     disabled.value = 0;
@@ -100,20 +99,20 @@ void GetPreferredFacePolygonOffset(const RegisterFile& regs,
     // ones that are rendered (except for shadow volumes).
     if (pa_su_sc_mode_cntl.poly_offset_front_enable &&
         !pa_su_sc_mode_cntl.cull_front) {
-      scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
-      offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
+      scale = regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
+      offset = regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
     }
     if (pa_su_sc_mode_cntl.poly_offset_back_enable &&
         !pa_su_sc_mode_cntl.cull_back && !scale && !offset) {
-      scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE].f32;
-      offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET].f32;
+      scale = regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE);
+      offset = regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET);
     }
   } else {
     // Non-triangle primitives use the front offset, but it's toggled via
     // poly_offset_para_enable.
     if (pa_su_sc_mode_cntl.poly_offset_para_enable) {
-      scale = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
-      offset = regs[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
+      scale = regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
+      offset = regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
     }
   }
   scale_out = scale;
@@ -125,10 +124,10 @@ bool IsPixelShaderNeededWithRasterization(const Shader& shader,
   assert_true(shader.type() == xenos::ShaderType::kPixel);
   assert_true(shader.is_ucode_analyzed());
 
-  // See xenos::ModeControl for explanation why the pixel shader is only used
-  // when it's kColorDepth here.
+  // See xenos::EdramMode for explanation why the pixel shader is only used when
+  // it's kColorDepth here.
   if (regs.Get<reg::RB_MODECONTROL>().edram_mode !=
-      xenos::ModeControl::kColorDepth) {
+      xenos::EdramMode::kColorDepth) {
     return false;
   }
 
@@ -148,7 +147,7 @@ bool IsPixelShaderNeededWithRasterization(const Shader& shader,
   }
 
   // Check if a color target is actually written.
-  uint32_t rb_color_mask = regs[XE_GPU_REG_RB_COLOR_MASK].u32;
+  uint32_t rb_color_mask = regs[XE_GPU_REG_RB_COLOR_MASK];
   uint32_t rts_remaining = shader.writes_color_targets();
   uint32_t rt_index;
   while (xe::bit_scan_forward(rts_remaining, &rt_index)) {
@@ -311,24 +310,26 @@ void GetHostViewportInfo(const RegisterFile& regs,
 
   // Obtain the original viewport values in a normalized way.
   float scale_xy[] = {
-      pa_cl_vte_cntl.vport_x_scale_ena ? regs[XE_GPU_REG_PA_CL_VPORT_XSCALE].f32
-                                       : 1.0f,
-      pa_cl_vte_cntl.vport_y_scale_ena ? regs[XE_GPU_REG_PA_CL_VPORT_YSCALE].f32
-                                       : 1.0f,
+      pa_cl_vte_cntl.vport_x_scale_ena
+          ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE)
+          : 1.0f,
+      pa_cl_vte_cntl.vport_y_scale_ena
+          ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE)
+          : 1.0f,
   };
   float scale_z = pa_cl_vte_cntl.vport_z_scale_ena
-                      ? regs[XE_GPU_REG_PA_CL_VPORT_ZSCALE].f32
+                      ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE)
                       : 1.0f;
   float offset_base_xy[] = {
       pa_cl_vte_cntl.vport_x_offset_ena
-          ? regs[XE_GPU_REG_PA_CL_VPORT_XOFFSET].f32
+          ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET)
           : 0.0f,
       pa_cl_vte_cntl.vport_y_offset_ena
-          ? regs[XE_GPU_REG_PA_CL_VPORT_YOFFSET].f32
+          ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET)
           : 0.0f,
   };
   float offset_z = pa_cl_vte_cntl.vport_z_offset_ena
-                       ? regs[XE_GPU_REG_PA_CL_VPORT_ZOFFSET].f32
+                       ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET)
                        : 0.0f;
   // Calculate all the integer.0 or integer.5 offsetting exactly at full
   // precision, separately so it can be used in other integer calculations
@@ -339,7 +340,8 @@ void GetHostViewportInfo(const RegisterFile& regs,
     offset_add_xy[0] += float(pa_sc_window_offset.window_x_offset);
     offset_add_xy[1] += float(pa_sc_window_offset.window_y_offset);
   }
-  if (cvars::half_pixel_offset && !pa_su_vtx_cntl.pix_center) {
+  if (cvars::half_pixel_offset &&
+      pa_su_vtx_cntl.pix_center == xenos::PixelCenter::kD3DZero) {
     offset_add_xy[0] += 0.5f;
     offset_add_xy[1] += 0.5f;
   }
@@ -398,16 +400,11 @@ void GetHostViewportInfo(const RegisterFile& regs,
       float offset_axis = offset_base_xy[i] + offset_add_xy[i];
       float scale_axis = scale_xy[i];
       float scale_axis_abs = std::abs(scale_xy[i]);
-      float axis_0 = offset_axis - scale_axis_abs;
-      float axis_1 = offset_axis + scale_axis_abs;
       float axis_max_unscaled_float = float(xy_max_unscaled[i]);
-      // max(0.0f, xy) drops NaN and < 0 - max picks the first argument in the
-      // !(a < b) case (always for NaN), min as float (axis_max_unscaled_float
-      // is well below 2^24) to safely drop very large values.
-      uint32_t axis_0_int =
-          uint32_t(std::min(axis_max_unscaled_float, std::max(0.0f, axis_0)));
-      uint32_t axis_1_int =
-          uint32_t(std::min(axis_max_unscaled_float, std::max(0.0f, axis_1)));
+      uint32_t axis_0_int = uint32_t(xe::clamp_float(
+          offset_axis - scale_axis_abs, 0.0f, axis_max_unscaled_float));
+      uint32_t axis_1_int = uint32_t(xe::clamp_float(
+          offset_axis + scale_axis_abs, 0.0f, axis_max_unscaled_float));
       uint32_t axis_extent_int = axis_1_int - axis_0_int;
       viewport_info_out.xy_offset[i] = axis_0_int * axis_resolution_scale;
       viewport_info_out.xy_extent[i] = axis_extent_int * axis_resolution_scale;
@@ -510,8 +507,8 @@ void GetHostViewportInfo(const RegisterFile& regs,
       // extension. But cases when this really matters are yet to be found -
       // trying to fix this will result in more correct depth values, but
       // incorrect clipping.
-      z_min = xe::saturate_unsigned(host_clip_offset_z);
-      z_max = xe::saturate_unsigned(host_clip_offset_z + host_clip_scale_z);
+      z_min = xe::saturate(host_clip_offset_z);
+      z_max = xe::saturate(host_clip_offset_z + host_clip_scale_z);
       // Direct3D 12 doesn't allow reverse depth range - on some drivers it
       // works, on some drivers it doesn't, actually, but it was never
       // explicitly allowed by the specification.
@@ -611,11 +608,11 @@ void GetScissor(const RegisterFile& regs, Scissor& scissor_out,
 uint32_t GetNormalizedColorMask(const RegisterFile& regs,
                                 uint32_t pixel_shader_writes_color_targets) {
   if (regs.Get<reg::RB_MODECONTROL>().edram_mode !=
-      xenos::ModeControl::kColorDepth) {
+      xenos::EdramMode::kColorDepth) {
     return 0;
   }
   uint32_t normalized_color_mask = 0;
-  uint32_t rb_color_mask = regs[XE_GPU_REG_RB_COLOR_MASK].u32;
+  uint32_t rb_color_mask = regs[XE_GPU_REG_RB_COLOR_MASK];
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     // Exclude the render targets not statically written to by the pixel shader.
     // If the shader doesn't write to a render target, it shouldn't be written
@@ -661,10 +658,16 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
                                       ? regs.Get<reg::SQ_VS_CONST>().base
                                       : regs.Get<reg::SQ_PS_CONST>().base;
   for (uint32_t constant_index : shader.memexport_stream_constants()) {
-    const auto& stream = regs.Get<xenos::xe_gpu_memexport_stream_t>(
-        XE_GPU_REG_SHADER_CONSTANT_000_X +
-        (float_constants_base + constant_index) * 4);
-    if (!stream.index_count) {
+    xenos::xe_gpu_memexport_stream_t stream =
+        regs.GetMemExportStream(float_constants_base + constant_index);
+    // Safety checks for stream constants potentially not set up if the export
+    // isn't done on the control flow path taken by the shader (not checking the
+    // Y component because the index is more likely to be constructed
+    // arbitrarily).
+    // The hardware validates the upper bits of eA according to the
+    // IPR2015-00325 sequencer specification.
+    if (stream.const_0x1 != 0x1 || stream.const_0x4b0 != 0x4B0 ||
+        stream.const_0x96 != 0x96 || !stream.index_count) {
       continue;
     }
     const FormatInfo& format_info =
@@ -705,7 +708,7 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     }
     // Add a new range if haven't expanded an existing one.
     if (!range_reused) {
-      ranges_out.emplace_back(stream.base_address, stream_size_bytes);
+      ranges_out.emplace_back(uint32_t(stream.base_address), stream_size_bytes);
     }
   }
 }
@@ -824,8 +827,7 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   // Get the extent of pixels covered by the resolve rectangle, according to the
   // top-left rasterization rule.
   // D3D9 HACK: Vertices to use are always in vf0, and are written by the CPU.
-  auto fetch = regs.Get<xenos::xe_gpu_vertex_fetch_t>(
-      XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0);
+  xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(0);
   if (fetch.type != xenos::FetchConstantType::kVertex || fetch.size != 3 * 2) {
     XELOGE("Unsupported resolve vertex buffer format");
     assert_always();
@@ -837,7 +839,9 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
       memory.TranslatePhysical(fetch.address * sizeof(uint32_t)));
   // Most vertices have a negative half-pixel offset applied, which we reverse.
   float half_pixel_offset =
-      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center ? 0.0f : 0.5f;
+      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero
+          ? 0.5f
+          : 0.0f;
   int32_t vertices_fixed[6];
   for (size_t i = 0; i < xe::countof(vertices_fixed); ++i) {
     vertices_fixed[i] = ui::FloatToD3D11Fixed16p8(
@@ -878,10 +882,10 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   GetScissor(regs, scissor, false);
   int32_t scissor_right = int32_t(scissor.offset[0] + scissor.extent[0]);
   int32_t scissor_bottom = int32_t(scissor.offset[1] + scissor.extent[1]);
-  x0 = xe::clamp(x0, int32_t(scissor.offset[0]), scissor_right);
-  y0 = xe::clamp(y0, int32_t(scissor.offset[1]), scissor_bottom);
-  x1 = xe::clamp(x1, int32_t(scissor.offset[0]), scissor_right);
-  y1 = xe::clamp(y1, int32_t(scissor.offset[1]), scissor_bottom);
+  x0 = std::clamp(x0, int32_t(scissor.offset[0]), scissor_right);
+  y0 = std::clamp(y0, int32_t(scissor.offset[1]), scissor_bottom);
+  x1 = std::clamp(x1, int32_t(scissor.offset[0]), scissor_right);
+  y1 = std::clamp(y1, int32_t(scissor.offset[1]), scissor_bottom);
 
   assert_true(x0 <= x1 && y0 <= y1);
 
@@ -994,7 +998,7 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   }
 
   // Calculate the destination memory extent.
-  uint32_t rb_copy_dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE].u32;
+  uint32_t rb_copy_dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
   uint32_t copy_dest_base_adjusted = rb_copy_dest_base;
   uint32_t copy_dest_extent_start, copy_dest_extent_end;
   auto rb_copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
@@ -1096,7 +1100,9 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   bool fill_half_pixel_offset =
       (draw_resolution_scale_x > 1 || draw_resolution_scale_y > 1) &&
       cvars::resolve_resolution_scale_fill_half_pixel_offset &&
-      cvars::half_pixel_offset && !regs.Get<reg::PA_SU_VTX_CNTL>().pix_center;
+      cvars::half_pixel_offset &&
+      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center ==
+          xenos::PixelCenter::kD3DZero;
   int32_t exp_bias = is_depth ? 0 : rb_copy_dest_info.copy_dest_exp_bias;
   ResolveEdramInfo depth_edram_info;
   depth_edram_info.packed = 0;
@@ -1164,9 +1170,9 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     info_out.copy_dest_info.copy_dest_swap = false;
   }
 
-  info_out.rb_depth_clear = regs[XE_GPU_REG_RB_DEPTH_CLEAR].u32;
-  info_out.rb_color_clear = regs[XE_GPU_REG_RB_COLOR_CLEAR].u32;
-  info_out.rb_color_clear_lo = regs[XE_GPU_REG_RB_COLOR_CLEAR_LO].u32;
+  info_out.rb_depth_clear = regs[XE_GPU_REG_RB_DEPTH_CLEAR];
+  info_out.rb_color_clear = regs[XE_GPU_REG_RB_COLOR_CLEAR];
+  info_out.rb_color_clear_lo = regs[XE_GPU_REG_RB_COLOR_CLEAR_LO];
 
   XELOGD(
       "Resolve: {},{} <= x,y < {},{}, {} -> {} at 0x{:08X} (potentially "

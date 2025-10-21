@@ -20,7 +20,6 @@
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/vulkan/vulkan_shared_memory.h"
 #include "xenia/ui/vulkan/vulkan_mem_alloc.h"
-#include "xenia/ui/vulkan/vulkan_provider.h"
 
 namespace xe {
 namespace gpu {
@@ -142,7 +141,6 @@ class VulkanTextureCache final : public TextureCache {
   enum LoadDescriptorSetIndex {
     kLoadDescriptorSetIndexDestination,
     kLoadDescriptorSetIndexSource,
-    kLoadDescriptorSetIndexConstants,
     kLoadDescriptorSetCount,
   };
 

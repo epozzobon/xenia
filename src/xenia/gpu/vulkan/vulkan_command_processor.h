@@ -50,7 +50,6 @@ class VulkanCommandProcessor : public CommandProcessor {
  public:
   // Single-descriptor layouts for use within a single frame.
   enum class SingleTransientDescriptorLayout {
-    kUniformBufferCompute,
     kStorageBufferCompute,
     kCount,
   };
@@ -143,9 +142,10 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void RestoreEdramSnapshot(const void* snapshot) override;
 
-  ui::vulkan::VulkanProvider& GetVulkanProvider() const {
-    return *static_cast<ui::vulkan::VulkanProvider*>(
-        graphics_system_->provider());
+  ui::vulkan::VulkanDevice* GetVulkanDevice() const {
+    return static_cast<const ui::vulkan::VulkanProvider*>(
+               graphics_system_->provider())
+        ->vulkan_device();
   }
 
   // Returns the deferred drawing command list for the currently open
@@ -216,16 +216,6 @@ class VulkanCommandProcessor : public CommandProcessor {
   // A frame must be open.
   VkDescriptorSet AllocateSingleTransientDescriptor(
       SingleTransientDescriptorLayout transient_descriptor_layout);
-  // Allocates a descriptor, space in the uniform buffer pool, and fills the
-  // VkWriteDescriptorSet structure and VkDescriptorBufferInfo referenced by it.
-  // Returns null in case of failure.
-  uint8_t* WriteTransientUniformBufferBinding(
-      size_t size, SingleTransientDescriptorLayout transient_descriptor_layout,
-      VkDescriptorBufferInfo& descriptor_buffer_info_out,
-      VkWriteDescriptorSet& write_descriptor_set_out);
-  uint8_t* WriteTransientUniformBufferBinding(
-      size_t size, SingleTransientDescriptorLayout transient_descriptor_layout,
-      VkDescriptorSet& descriptor_set_out);
 
   // The returned reference is valid until a cache clear.
   VkDescriptorSetLayout GetTextureDescriptorSetLayout(bool is_vertex,
@@ -737,6 +727,9 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   // System shader constants.
   SpirvShaderTranslator::SystemConstants system_constants_;
+
+  // Temporary storage for memexport stream constants used in the draw.
+  std::vector<draw_util::MemExportRange> memexport_ranges_;
 };
 
 }  // namespace vulkan

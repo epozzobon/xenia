@@ -51,15 +51,15 @@ VulkanPipelineCache::VulkanPipelineCache(
 VulkanPipelineCache::~VulkanPipelineCache() { Shutdown(); }
 
 bool VulkanPipelineCache::Initialize() {
-  const ui::vulkan::VulkanProvider& provider =
-      command_processor_.GetVulkanProvider();
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
 
   bool edram_fragment_shader_interlock =
       render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock;
 
   shader_translator_ = std::make_unique<SpirvShaderTranslator>(
-      SpirvShaderTranslator::Features(provider),
+      SpirvShaderTranslator::Features(vulkan_device),
       render_target_cache_.msaa_2x_attachments_supported(),
       render_target_cache_.msaa_2x_no_attachments_supported(),
       edram_fragment_shader_interlock);
@@ -68,7 +68,7 @@ bool VulkanPipelineCache::Initialize() {
     std::vector<uint8_t> depth_only_fragment_shader_code =
         shader_translator_->CreateDepthOnlyFragmentShader();
     depth_only_fragment_shader_ = ui::vulkan::util::CreateShaderModule(
-        provider,
+        vulkan_device,
         reinterpret_cast<const uint32_t*>(
             depth_only_fragment_shader_code.data()),
         depth_only_fragment_shader_code.size());
@@ -85,10 +85,10 @@ bool VulkanPipelineCache::Initialize() {
 }
 
 void VulkanPipelineCache::Shutdown() {
-  const ui::vulkan::VulkanProvider& provider =
-      command_processor_.GetVulkanProvider();
-  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider.dfn();
-  VkDevice device = provider.device();
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
 
   // Destroy all pipelines.
   last_pipeline_ = nullptr;
@@ -136,7 +136,7 @@ VulkanShader* VulkanPipelineCache::LoadShader(xenos::ShaderType shader_type,
   // We need to track it even if it fails translation so we know not to try
   // again.
   VulkanShader* shader =
-      new VulkanShader(command_processor_.GetVulkanProvider(), shader_type,
+      new VulkanShader(command_processor_.GetVulkanDevice(), shader_type,
                        data_hash, host_address, dword_count);
   shaders_.emplace(data_hash, shader);
   return shader;
@@ -268,9 +268,9 @@ bool VulkanPipelineCache::ConfigurePipeline(
     VulkanRenderTargetCache::RenderPassKey render_pass_key,
     VkPipeline& pipeline_out,
     const PipelineLayoutProvider*& pipeline_layout_out) {
-#if XE_UI_VULKAN_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_VULKAN_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   // Ensure shaders are translated - needed now for GetCurrentStateDescription.
   if (!EnsureShadersTranslated(vertex_shader, pixel_shader)) {
@@ -471,13 +471,9 @@ void VulkanPipelineCache::WritePipelineRenderTargetDescription(
     render_target_out.dst_alpha_blend_factor =
         kBlendFactorMap[uint32_t(blend_control.alpha_destblend)];
     render_target_out.alpha_blend_op = blend_control.alpha_comb_fcn;
-    const ui::vulkan::VulkanProvider& provider =
-        command_processor_.GetVulkanProvider();
-    const VkPhysicalDevicePortabilitySubsetFeaturesKHR*
-        device_portability_subset_features =
-            provider.device_portability_subset_features();
-    if (device_portability_subset_features &&
-        !device_portability_subset_features->constantAlphaColorBlendFactors) {
+    if (!command_processor_.GetVulkanDevice()
+             ->properties()
+             .constantAlphaColorBlendFactors) {
       if (blend_control.color_srcblend == xenos::BlendFactor::kConstantAlpha) {
         render_target_out.src_color_blend_factor =
             PipelineBlendFactor::kConstantColor;
@@ -516,12 +512,8 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
     PipelineDescription& description_out) const {
   description_out.Reset();
 
-  const ui::vulkan::VulkanProvider& provider =
-      command_processor_.GetVulkanProvider();
-  const VkPhysicalDeviceFeatures& device_features = provider.device_features();
-  const VkPhysicalDevicePortabilitySubsetFeaturesKHR*
-      device_portability_subset_features =
-          provider.device_portability_subset_features();
+  const ui::vulkan::VulkanDevice::Properties& device_properties =
+      command_processor_.GetVulkanDevice()->properties();
 
   const RegisterFile& regs = register_file_;
   auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
@@ -556,8 +548,7 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
       break;
     case xenos::PrimitiveType::kTriangleFan:
       // The check should be performed at primitive processing time.
-      assert_true(!device_portability_subset_features ||
-                  device_portability_subset_features->triangleFans);
+      assert_true(device_properties.triangleFans);
       primitive_topology = PipelinePrimitiveTopology::kTriangleFan;
       break;
     case xenos::PrimitiveType::kTriangleStrip:
@@ -581,7 +572,7 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
       primitive_processing_result.host_primitive_reset_enabled;
 
   description_out.depth_clamp_enable =
-      device_features.depthClamp &&
+      device_properties.depthClamp &&
       regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
 
   // TODO(Triang3l): Tessellation.
@@ -597,7 +588,7 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
     bool cull_back = pa_su_sc_mode_cntl.cull_back;
     description_out.cull_front = cull_front;
     description_out.cull_back = cull_back;
-    if (device_features.fillModeNonSolid) {
+    if (device_properties.fillModeNonSolid) {
       xenos::PolygonType polygon_type = xenos::PolygonType::kTriangles;
       if (!cull_front) {
         polygon_type =
@@ -614,11 +605,9 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
         case xenos::PolygonType::kPoints:
           // When points are not supported, use lines instead, preserving
           // debug-like purpose.
-          description_out.polygon_mode =
-              (!device_portability_subset_features ||
-               device_portability_subset_features->pointPolygons)
-                  ? PipelinePolygonMode::kPoint
-                  : PipelinePolygonMode::kLine;
+          description_out.polygon_mode = device_properties.pointPolygons
+                                             ? PipelinePolygonMode::kPoint
+                                             : PipelinePolygonMode::kLine;
           break;
         case xenos::PolygonType::kLines:
           description_out.polygon_mode = PipelinePolygonMode::kLine;
@@ -683,83 +672,17 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
     // Color blending and write masks (filled only for the attachments present
     // in the render pass object).
     uint32_t render_pass_color_rts = render_pass_key.depth_and_color_used >> 1;
-    if (device_features.independentBlend) {
-      uint32_t render_pass_color_rts_remaining = render_pass_color_rts;
-      uint32_t color_rt_index;
-      while (xe::bit_scan_forward(render_pass_color_rts_remaining,
-                                  &color_rt_index)) {
-        render_pass_color_rts_remaining &= ~(uint32_t(1) << color_rt_index);
-        WritePipelineRenderTargetDescription(
-            regs.Get<reg::RB_BLENDCONTROL>(
-                reg::RB_BLENDCONTROL::rt_register_indices[color_rt_index]),
-            (normalized_color_mask >> (color_rt_index * 4)) & 0b1111,
-            description_out.render_targets[color_rt_index]);
-      }
-    } else {
-      // Take the blend control for the first render target that the guest wants
-      // to write to (consider it the most important) and use it for all render
-      // targets, if any.
-      // TODO(Triang3l): Implement an option for independent blending via
-      // replaying the render pass for each set of render targets with unique
-      // blending parameters, with depth / stencil saved before the first and
-      // restored before each of the rest maybe? Though independent blending
-      // support is pretty wide, with a quite prominent exception of Adreno 4xx
-      // apparently.
-      uint32_t render_pass_color_rts_remaining = render_pass_color_rts;
-      uint32_t render_pass_first_color_rt_index;
-      if (xe::bit_scan_forward(render_pass_color_rts_remaining,
-                               &render_pass_first_color_rt_index)) {
-        render_pass_color_rts_remaining &=
-            ~(uint32_t(1) << render_pass_first_color_rt_index);
-        PipelineRenderTarget& render_pass_first_color_rt =
-            description_out.render_targets[render_pass_first_color_rt_index];
-        uint32_t common_blend_rt_index;
-        if (xe::bit_scan_forward(normalized_color_mask,
-                                 &common_blend_rt_index)) {
-          common_blend_rt_index >>= 2;
-          // If a common write mask will be used for multiple render targets,
-          // use the original RB_COLOR_MASK instead of the normalized color mask
-          // as the normalized color mask has non-existent components forced to
-          // written (don't need reading to be preserved), while the number of
-          // components may vary between render targets. The attachments in the
-          // pass that must not be written to at all will be excluded via a
-          // shader modification.
-          WritePipelineRenderTargetDescription(
-              regs.Get<reg::RB_BLENDCONTROL>(
-                  reg::RB_BLENDCONTROL::rt_register_indices
-                      [common_blend_rt_index]),
-              (((normalized_color_mask &
-                 ~(uint32_t(0b1111) << (4 * common_blend_rt_index)))
-                    ? regs[XE_GPU_REG_RB_COLOR_MASK].u32
-                    : normalized_color_mask) >>
-               (4 * common_blend_rt_index)) &
-                  0b1111,
-              render_pass_first_color_rt);
-        } else {
-          // No render targets are written to, though the render pass still may
-          // contain color attachments - set them to not written and not
-          // blending.
-          render_pass_first_color_rt.src_color_blend_factor =
-              PipelineBlendFactor::kOne;
-          render_pass_first_color_rt.dst_color_blend_factor =
-              PipelineBlendFactor::kZero;
-          render_pass_first_color_rt.color_blend_op = xenos::BlendOp::kAdd;
-          render_pass_first_color_rt.src_alpha_blend_factor =
-              PipelineBlendFactor::kOne;
-          render_pass_first_color_rt.dst_alpha_blend_factor =
-              PipelineBlendFactor::kZero;
-          render_pass_first_color_rt.alpha_blend_op = xenos::BlendOp::kAdd;
-        }
-        // Reuse the same blending settings for all render targets in the pass,
-        // for description consistency.
-        uint32_t color_rt_index;
-        while (xe::bit_scan_forward(render_pass_color_rts_remaining,
-                                    &color_rt_index)) {
-          render_pass_color_rts_remaining &= ~(uint32_t(1) << color_rt_index);
-          description_out.render_targets[color_rt_index] =
-              render_pass_first_color_rt;
-        }
-      }
+    assert_true(device_properties.independentBlend);
+    uint32_t render_pass_color_rts_remaining = render_pass_color_rts;
+    uint32_t color_rt_index;
+    while (xe::bit_scan_forward(render_pass_color_rts_remaining,
+                                &color_rt_index)) {
+      render_pass_color_rts_remaining &= ~(uint32_t(1) << color_rt_index);
+      WritePipelineRenderTargetDescription(
+          regs.Get<reg::RB_BLENDCONTROL>(
+              reg::RB_BLENDCONTROL::rt_register_indices[color_rt_index]),
+          (normalized_color_mask >> (color_rt_index * 4)) & 0b1111,
+          description_out.render_targets[color_rt_index]);
     }
   }
 
@@ -779,88 +702,53 @@ bool VulkanPipelineCache::ArePipelineRequirementsMet(
     return false;
   }
 
-  const ui::vulkan::VulkanProvider& provider =
-      command_processor_.GetVulkanProvider();
+  const ui::vulkan::VulkanDevice::Properties& device_properties =
+      command_processor_.GetVulkanDevice()->properties();
 
-  const VkPhysicalDevicePortabilitySubsetFeaturesKHR*
-      device_portability_subset_features =
-          provider.device_portability_subset_features();
-  if (device_portability_subset_features) {
-    if (description.primitive_topology ==
-            PipelinePrimitiveTopology::kTriangleFan &&
-        !device_portability_subset_features->triangleFans) {
-      return false;
-    }
-
-    if (description.polygon_mode == PipelinePolygonMode::kPoint &&
-        !device_portability_subset_features->pointPolygons) {
-      return false;
-    }
-
-    if (!device_portability_subset_features->constantAlphaColorBlendFactors) {
-      uint32_t color_rts_remaining =
-          description.render_pass_key.depth_and_color_used >> 1;
-      uint32_t color_rt_index;
-      while (xe::bit_scan_forward(color_rts_remaining, &color_rt_index)) {
-        color_rts_remaining &= ~(uint32_t(1) << color_rt_index);
-        const PipelineRenderTarget& color_rt =
-            description.render_targets[color_rt_index];
-        if (color_rt.src_color_blend_factor ==
-                PipelineBlendFactor::kConstantAlpha ||
-            color_rt.src_color_blend_factor ==
-                PipelineBlendFactor::kOneMinusConstantAlpha ||
-            color_rt.dst_color_blend_factor ==
-                PipelineBlendFactor::kConstantAlpha ||
-            color_rt.dst_color_blend_factor ==
-                PipelineBlendFactor::kOneMinusConstantAlpha) {
-          return false;
-        }
-      }
-    }
-  }
-
-  const VkPhysicalDeviceFeatures& device_features = provider.device_features();
-
-  if (!device_features.geometryShader &&
+  if (!device_properties.geometryShader &&
       description.geometry_shader != PipelineGeometryShader::kNone) {
     return false;
   }
 
-  if (!device_features.depthClamp && description.depth_clamp_enable) {
+  if (!device_properties.triangleFans &&
+      description.primitive_topology ==
+          PipelinePrimitiveTopology::kTriangleFan) {
     return false;
   }
 
-  if (!device_features.fillModeNonSolid &&
+  if (!device_properties.depthClamp && description.depth_clamp_enable) {
+    return false;
+  }
+
+  if (!device_properties.pointPolygons &&
+      description.polygon_mode == PipelinePolygonMode::kPoint) {
+    return false;
+  }
+
+  if (!device_properties.fillModeNonSolid &&
       description.polygon_mode != PipelinePolygonMode::kFill) {
     return false;
   }
 
-  if (!device_features.independentBlend) {
+  assert_true(device_properties.independentBlend);
+
+  if (!device_properties.constantAlphaColorBlendFactors) {
     uint32_t color_rts_remaining =
         description.render_pass_key.depth_and_color_used >> 1;
-    uint32_t first_color_rt_index;
-    if (xe::bit_scan_forward(color_rts_remaining, &first_color_rt_index)) {
-      color_rts_remaining &= ~(uint32_t(1) << first_color_rt_index);
-      const PipelineRenderTarget& first_color_rt =
-          description.render_targets[first_color_rt_index];
-      uint32_t color_rt_index;
-      while (xe::bit_scan_forward(color_rts_remaining, &color_rt_index)) {
-        color_rts_remaining &= ~(uint32_t(1) << color_rt_index);
-        const PipelineRenderTarget& color_rt =
-            description.render_targets[color_rt_index];
-        if (color_rt.src_color_blend_factor !=
-                first_color_rt.src_color_blend_factor ||
-            color_rt.dst_color_blend_factor !=
-                first_color_rt.dst_color_blend_factor ||
-            color_rt.color_blend_op != first_color_rt.color_blend_op ||
-            color_rt.src_alpha_blend_factor !=
-                first_color_rt.src_alpha_blend_factor ||
-            color_rt.dst_alpha_blend_factor !=
-                first_color_rt.dst_alpha_blend_factor ||
-            color_rt.alpha_blend_op != first_color_rt.alpha_blend_op ||
-            color_rt.color_write_mask != first_color_rt.color_write_mask) {
-          return false;
-        }
+    uint32_t color_rt_index;
+    while (xe::bit_scan_forward(color_rts_remaining, &color_rt_index)) {
+      color_rts_remaining &= ~(uint32_t(1) << color_rt_index);
+      const PipelineRenderTarget& color_rt =
+          description.render_targets[color_rt_index];
+      if (color_rt.src_color_blend_factor ==
+              PipelineBlendFactor::kConstantAlpha ||
+          color_rt.src_color_blend_factor ==
+              PipelineBlendFactor::kOneMinusConstantAlpha ||
+          color_rt.dst_color_blend_factor ==
+              PipelineBlendFactor::kConstantAlpha ||
+          color_rt.dst_color_blend_factor ==
+              PipelineBlendFactor::kOneMinusConstantAlpha) {
+        return false;
       }
     }
   }
@@ -1868,10 +1756,9 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
 
   // Create the shader module, and store the handle even if creation fails not
   // to try to create it again later.
-  const ui::vulkan::VulkanProvider& provider =
-      command_processor_.GetVulkanProvider();
   VkShaderModule shader_module = ui::vulkan::util::CreateShaderModule(
-      provider, reinterpret_cast<const uint32_t*>(shader_code.data()),
+      command_processor_.GetVulkanDevice(),
+      reinterpret_cast<const uint32_t*>(shader_code.data()),
       sizeof(uint32_t) * shader_code.size());
   if (shader_module == VK_NULL_HANDLE) {
     XELOGE(
@@ -1911,9 +1798,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
     return false;
   }
 
-  const ui::vulkan::VulkanProvider& provider =
-      command_processor_.GetVulkanProvider();
-  const VkPhysicalDeviceFeatures& device_features = provider.device_features();
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
 
   bool edram_fragment_shader_interlock =
       render_target_cache_.GetPath() ==
@@ -2192,6 +2078,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
                                               VK_BLEND_OP_ADD,
                                               VK_BLEND_OP_ADD,
                                               VK_BLEND_OP_ADD};
+      assert_true(vulkan_device->properties().independentBlend);
       uint32_t color_rts_remaining = color_rts_used;
       uint32_t color_rt_index;
       while (xe::bit_scan_forward(color_rts_remaining, &color_rt_index)) {
@@ -2222,28 +2109,10 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
         }
         color_blend_attachment.colorWriteMask =
             VkColorComponentFlags(color_rt.color_write_mask);
-        if (!device_features.independentBlend) {
-          // For non-independent blend, the pAttachments element for the first
-          // actually used color will be replicated into all.
-          break;
-        }
       }
     }
     color_blend_state.attachmentCount = 32 - xe::lzcnt(color_rts_used);
     color_blend_state.pAttachments = color_blend_attachments;
-    if (color_rts_used && !device_features.independentBlend) {
-      // "If the independent blending feature is not enabled, all elements of
-      //  pAttachments must be identical."
-      uint32_t first_color_rt_index;
-      xe::bit_scan_forward(color_rts_used, &first_color_rt_index);
-      for (uint32_t i = 0; i < color_blend_state.attachmentCount; ++i) {
-        if (i == first_color_rt_index) {
-          continue;
-        }
-        color_blend_attachments[i] =
-            color_blend_attachments[first_color_rt_index];
-      }
-    }
   }
 
   std::array<VkDynamicState, 7> dynamic_states;
@@ -2294,8 +2163,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   pipeline_create_info.basePipelineHandle = VK_NULL_HANDLE;
   pipeline_create_info.basePipelineIndex = -1;
 
-  const ui::vulkan::VulkanProvider::DeviceFunctions& dfn = provider.dfn();
-  VkDevice device = provider.device();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
   if (dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
                                     &pipeline_create_info, nullptr,

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cfloat>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -22,6 +23,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/xenos.h"
@@ -434,9 +436,11 @@ bool D3D12TextureCache::Initialize() {
   // Create the loading root signature.
   D3D12_ROOT_PARAMETER root_parameters[3];
   // Parameter 0 is constants (changed multiple times when untiling).
-  root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-  root_parameters[0].Descriptor.ShaderRegister = 0;
-  root_parameters[0].Descriptor.RegisterSpace = 0;
+  root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  root_parameters[0].Constants.ShaderRegister = 0;
+  root_parameters[0].Constants.RegisterSpace = 0;
+  root_parameters[0].Constants.Num32BitValues =
+      sizeof(LoadConstants) / sizeof(uint32_t);
   root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   // Parameter 1 is the source (may be changed multiple times for the same
   // destination).
@@ -766,9 +770,9 @@ void D3D12TextureCache::EndFrame() {
 }
 
 void D3D12TextureCache::RequestTextures(uint32_t used_texture_mask) {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   TextureCache::RequestTextures(used_texture_mask);
 
@@ -911,12 +915,12 @@ void D3D12TextureCache::WriteActiveTextureBindfulSRV(
   }
   auto device = provider.GetDevice();
   {
-#if XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#if XE_GPU_FINE_GRAINED_DRAW_SCOPES
     SCOPE_profile_cpu_i(
         "gpu",
         "xe::gpu::d3d12::D3D12TextureCache::WriteActiveTextureBindfulSRV->"
         "CopyDescriptorsSimple");
-#endif  // XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES
+#endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
     device->CopyDescriptorsSimple(1, handle, source_handle,
                                   D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   }
@@ -960,8 +964,8 @@ uint32_t D3D12TextureCache::GetActiveTextureBindlessSRVIndex(
 D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
     const D3D12Shader::SamplerBinding& binding) const {
   const auto& regs = register_file();
-  const auto& fetch = regs.Get<xenos::xe_gpu_texture_fetch_t>(
-      XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 6);
+  xenos::xe_gpu_texture_fetch_t fetch =
+      regs.GetTextureFetch(binding.fetch_constant);
 
   SamplerParameters parameters;
 
@@ -1441,8 +1445,7 @@ ID3D12Resource* D3D12TextureCache::RequestSwapTexture(
     D3D12_SHADER_RESOURCE_VIEW_DESC& srv_desc_out,
     xenos::TextureFormat& format_out) {
   const auto& regs = register_file();
-  const auto& fetch = regs.Get<xenos::xe_gpu_texture_fetch_t>(
-      XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0);
+  xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(0);
   TextureKey key;
   BindingInfoFromFetchConstant(fetch, key, nullptr);
   if (!key.is_valid || key.base_page == 0 ||
@@ -1952,22 +1955,23 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     load_constants.host_offset = uint32_t(level_host_slice_layout.Offset);
     load_constants.host_pitch = level_host_slice_layout.Footprint.RowPitch;
 
+    command_list.D3DSetComputeRoot32BitConstants(
+        0, sizeof(load_constants) / sizeof(uint32_t), &load_constants, 0);
+
     uint32_t level_array_slice_stride_bytes_scaled =
         level_guest_layout.array_slice_stride_bytes *
         (texture_resolution_scale_x * texture_resolution_scale_y);
     for (uint32_t slice = 0; slice < array_size; ++slice) {
-      D3D12_GPU_VIRTUAL_ADDRESS cbuffer_gpu_address;
-      uint8_t* cbuffer_mapping = cbuffer_pool.Request(
-          command_processor_.GetCurrentFrame(), sizeof(load_constants),
-          D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, nullptr, nullptr,
-          &cbuffer_gpu_address);
-      if (cbuffer_mapping == nullptr) {
-        command_processor_.ReleaseScratchGPUBuffer(copy_buffer,
-                                                   copy_buffer_state);
-        return false;
+      if (slice != 0) {
+        command_list.D3DSetComputeRoot32BitConstants(
+            0, sizeof(load_constants.guest_offset) / sizeof(uint32_t),
+            &load_constants.guest_offset,
+            offsetof(LoadConstants, guest_offset) / sizeof(uint32_t));
+        command_list.D3DSetComputeRoot32BitConstants(
+            0, sizeof(load_constants.host_offset) / sizeof(uint32_t),
+            &load_constants.host_offset,
+            offsetof(LoadConstants, host_offset) / sizeof(uint32_t));
       }
-      std::memcpy(cbuffer_mapping, &load_constants, sizeof(load_constants));
-      command_list.D3DSetComputeRootConstantBufferView(0, cbuffer_gpu_address);
       assert_true(copy_buffer_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       command_processor_.SubmitBarriers();
       command_list.D3DDispatch(group_count_x, group_count_y,

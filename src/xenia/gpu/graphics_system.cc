@@ -55,13 +55,13 @@ GraphicsSystem::~GraphicsSystem() = default;
 X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                                kernel::KernelState* kernel_state,
                                ui::WindowedAppContext* app_context,
-                               [[maybe_unused]] bool is_surface_required) {
+                               bool with_presentation) {
   memory_ = processor->memory();
   processor_ = processor;
   kernel_state_ = kernel_state;
   app_context_ = app_context;
 
-  if (provider_) {
+  if (with_presentation && provider_) {
     // Safe if either the UI thread call or the presenter creation fails.
     if (app_context_) {
       app_context_->CallInUIThreadSynchronous([this]() {
@@ -201,7 +201,7 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
   }
 
   assert_true(r < RegisterFile::kRegisterCount);
-  return register_file_.values[r].u32;
+  return register_file_.values[r];
 }
 
 void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
@@ -219,7 +219,7 @@ void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
   }
 
   assert_true(r < RegisterFile::kRegisterCount);
-  register_file_.values[r].u32 = value;
+  register_file_.values[r] = value;
 }
 
 void GraphicsSystem::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
